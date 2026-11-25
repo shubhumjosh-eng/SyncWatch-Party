@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>SyncWatch Party — Co-op Watch Room</title>
+  <title>SyncWatch Party - Co-op Watch Room</title>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
@@ -25,7 +25,7 @@
 
       <div class="telemetry" aria-label="Live sync telemetry">
         <div class="badge"><span>NET</span><strong id="netState">OFFLINE</strong></div>
-        <div class="badge"><span>ROLE</span><strong id="hostState">—</strong></div>
+        <div class="badge"><span>ROLE</span><strong id="hostState">-</strong></div>
         <div class="badge"><span>OFFSET</span><strong id="offsetVal">0 ms</strong></div>
         <div class="badge"><span>RTT</span><strong id="rttVal">0 ms</strong></div>
         <div class="badge"><span>DRIFT</span><strong id="driftVal">0 ms</strong></div>
@@ -43,15 +43,33 @@
           <div class="tools">
             <button id="penBtn" class="btn tool" title="Draw with pen">PEN</button>
             <button id="arrowBtn" class="btn tool" title="Draw an arrow">ARROW</button>
+            <div class="swatches" aria-label="Telestrator color">
+              <button class="swatch active" data-color="#56d6c4" style="--swatch:#56d6c4" title="Teal"></button>
+              <button class="swatch" data-color="#f0b85a" style="--swatch:#f0b85a" title="Amber"></button>
+              <button class="swatch" data-color="#ff7a7a" style="--swatch:#ff7a7a" title="Red"></button>
+              <button class="swatch" data-color="#e6edf3" style="--swatch:#e6edf3" title="White"></button>
+              <button class="swatch" data-color="#6aa9ff" style="--swatch:#6aa9ff" title="Blue"></button>
+            </div>
+            <label class="toggle"><input id="fadeToggle" type="checkbox"> AUTO-FADE</label>
             <button id="clearBtn" class="btn ghost">CLEAR</button>
           </div>
         </div>
 
+        <div class="source-bar">
+          <input id="urlInput" type="url" placeholder="Paste direct .mp4/.webm URL" spellcheck="false">
+          <button id="loadUrlBtn" class="btn ghost">LOAD URL</button>
+          <label class="btn ghost file-label">LOCAL FILE<input id="fileInput" type="file" accept="video/mp4,video/webm,.mp4,.webm" hidden></label>
+          <button id="shareBtn" class="btn ghost">SHARE SCREEN</button>
+        </div>
+
         <div class="screen" id="screen">
-          <video id="video" playsinline preload="auto" crossorigin="anonymous"></video>
+          <video id="video" playsinline preload="auto"></video>
           <canvas id="overlay"></canvas>
           <div class="screen-tag" id="syncTag">WAITING FOR ROOM</div>
+          <div id="floatLayer" class="float-layer" aria-hidden="true"></div>
         </div>
+
+        <div class="reaction-strip" id="reactionStrip" aria-label="Timeline reactions"></div>
 
         <div class="controls">
           <button id="playBtn" class="btn primary">PLAY</button>
@@ -66,17 +84,41 @@
           <button id="clipNowBtn" class="btn ghost">CLIP NOW</button>
         </div>
 
+        <div class="reactions">
+          <span>REACT</span>
+          <button class="reaction" data-emoji="&#128293;">&#128293;</button>
+          <button class="reaction" data-emoji="&#127919;">&#127919;</button>
+          <button class="reaction" data-emoji="&#9889;">&#9889;</button>
+          <button class="reaction" data-emoji="&#128514;">&#128514;</button>
+        </div>
+
         <div class="status-line" id="statusLine">Waiting for a room connection.</div>
       </section>
 
       <aside class="panel side-panel">
         <section>
           <h2>ROOM</h2>
+          <div class="call-controls">
+            <button id="joinCallBtn" class="btn ghost">JOIN CALL</button>
+            <button id="muteBtn" class="btn ghost" disabled>MIC MUTE</button>
+            <button id="camBtn" class="btn ghost" disabled>CAM TOGGLE</button>
+          </div>
+          <div id="callTiles" class="call-tiles"></div>
           <div id="presence" class="presence"><div class="peer">You</div></div>
         </section>
 
         <section>
+          <h2>ROOM CHAT</h2>
+          <div id="chatMessages" class="chat-messages"><p class="empty">No messages yet.</p></div>
+          <form id="chatForm" class="chat-form">
+            <input id="chatInput" placeholder="Message the room..." autocomplete="off" maxlength="500">
+            <button class="btn primary" type="submit">SEND</button>
+          </form>
+        </section>
+
+        <section>
           <h2>CLIP REEL</h2>
+          <button id="stitchBtn" class="btn ghost">STITCH REEL</button>
           <div id="clips" class="clips">
             <p class="empty">No clips yet. Watch something and press CLIP THAT.</p>
           </div>
@@ -90,8 +132,8 @@
     </main>
 
     <footer>
-      <span>SyncWatch Party · built for the CSC Winter Sparkathon</span>
-      <span>Demo videos: MDN CC0 samples · FFmpeg.wasm runs entirely in your browser</span>
+      <span>SyncWatch Party - built for the CSC Winter Sparkathon</span>
+      <span>Demo videos: MDN CC0 samples - FFmpeg.wasm runs in your browser</span>
     </footer>
   </div>
 

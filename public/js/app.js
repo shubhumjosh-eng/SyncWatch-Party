@@ -1,6 +1,7 @@
 import { SyncEngine } from './syncEngine.js';
 import { Telestrator } from './telestrator.js';
 import { ClipConsensus } from './clipConsensus.js';
+import { RTCCall } from './rtcCall.js';
 
 const el = (id) => document.getElementById(id);
 
@@ -9,7 +10,6 @@ const canvas = el('overlay');
 const screen = el('screen');
 const seek = el('seek');
 const roomInput = el('roomInput');
-const statusLine = el('statusLine');
 
 const initialRoom = new URLSearchParams(location.search).get('room');
 if (initialRoom) roomInput.value = initialRoom.toUpperCase();
@@ -21,23 +21,45 @@ let roomCode = roomInput.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 
 let isHost = false;
 let isSeeking = false;
 let ffmpegJob = 0;
+let peerIds = [];
+let callJoined = false;
+let sharing = false;
+
+const jobs = new Map();
 const activeJobs = new Set();
+const clips = [];
+let screenRecorder = null;
+let screenChunks = [];
+let pendingScreenStream = null;
+let currentSource = { kind: 'sample', src: '', name: 'FLOWER' };
+
+const COLORS = ['#56d6c4', '#f0b85a', '#ff7a7a', '#6aa9ff', '#d6a6ff', '#8bd450'];
+
+function colorFor(id) {
+  let hash = 0;
+  for (let i = 0; i < String(id).length; i++) hash = (hash * 31 + String(id).charCodeAt(i)) >>> 0;
+  return COLORS[hash % COLORS.length];
+}
 
 function log(text) {
   const line = document.createElement('div');
   line.textContent = `[${new Date().toLocaleTimeString([], { hour12: false })}] ${text}`;
   el('log').prepend(line);
-  while (el('log').children.length > 30) el('log').lastChild.remove();
+  while (el('log').children.length > 40) el('log').lastChild.remove();
 }
 
 function setStatus(text) {
-  statusLine.textContent = text;
+  el('statusLine').textContent = text;
 }
 
 function formatTime(seconds) {
   if (!Number.isFinite(seconds)) return '0:00';
   const total = Math.max(0, Math.floor(seconds));
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
+}
+
+function formatStamp(seconds) {
+  return `@${formatTime(seconds)}`;
 }
 
 function send(obj) {
@@ -57,35 +79,78 @@ const sync = new SyncEngine({
   }
 });
 
-const teles = new Telestrator({
-  canvas,
-  send,
-  onLog: log
-});
+const teles = new Telestrator({ canvas, send, onLog: log });
 
 const consensus = new ClipConsensus({
   send,
   onCount: ({ count, need }) => {
-    setStatus(`Clip votes: ${count}/${need}. Two or more peers within 5 seconds triggers an automatic clip.`);
+    setStatus(`Clip votes: ${count}/${need}. A majority within 5 seconds triggers an automatic clip.`);
   },
   onConsensus: (msg) => {
     log(`Clip consensus reached by ${msg.voters} viewers`);
-    setStatus(`Consensus at ${formatTime(msg.time)} — clipping on every device.`);
+    setStatus(`Consensus at ${formatTime(msg.time)} - clipping on every device.`);
     clipAt(msg.time);
   }
 });
+
+function handleRtcStream({ id, kind, stream }) {
+  renderCallTile(id, kind, stream, false);
+  if (kind === 'screen' && currentSource.kind === 'screen' && id === currentSource.hostId) {
+    attachScreenStream(stream);
+  } else if (kind === 'screen') {
+    pendingScreenStream = stream;
+  }
+}
+
+const rtc = new RTCCall({
+  send,
+  getPeers: () => peerIds.filter((id) => id !== clientId),
+  onStream: handleRtcStream,
+  onLog: log
+});
+
+function renderCallTile(id, kind, stream, local) {
+  const key = `${id}:${kind}:${local ? 'local' : 'remote'}`;
+  const container = el('callTiles');
+  let tile = container.querySelector(`[data-key="${key}"]`);
+  if (!tile) {
+    tile = document.createElement('div');
+    tile.className = 'call-tile';
+    tile.dataset.key = key;
+    tile.style.setProperty('--tile-color', colorFor(id));
+    const media = document.createElement('video');
+    media.autoplay = true;
+    media.playsInline = true;
+    media.muted = local;
+    const label = document.createElement('span');
+    label.textContent = `${local ? 'YOU' : id.slice(0, 6)} ${kind.toUpperCase()}`;
+    tile.append(media, label);
+    container.append(tile);
+  }
+  const media = tile.querySelector('video');
+  if (media.srcObject !== stream) media.srcObject = stream;
+}
+
+function attachScreenStream(stream) {
+  if (currentSource.kind !== 'screen') return;
+  if (video.srcObject !== stream) {
+    video.srcObject = stream;
+    video.muted = false;
+    video.play().catch(() => {});
+  }
+  setStatus('Watching the host screen share live.');
+}
 
 const ffmpegWorker = new Worker('/js/ffmpegWorker.js', { type: 'module' });
 
 ffmpegWorker.onmessage = (event) => {
   const msg = event.data || {};
   if (msg.type === 'stage') {
-    setStatus(`${msg.stage}…`);
+    setStatus(`${msg.stage}...`);
     return;
   }
   if (msg.type === 'progress') {
-    const pct = Math.round((msg.progress || 0) * 100);
-    setStatus(`Encoding highlight — ${pct}%`);
+    setStatus(`Encoding highlight - ${Math.round((msg.progress || 0) * 100)}%`);
     return;
   }
   if (msg.type === 'log') {
@@ -102,11 +167,12 @@ ffmpegWorker.onmessage = (event) => {
     activeJobs.delete(msg.id);
     const blob = new Blob([msg.buffer], { type: 'video/mp4' });
     const url = URL.createObjectURL(blob);
-    const job = msg.id;
-    addClipCard(url, job);
-    log(`Clip ${job} ready (${(blob.size / 1024 / 1024).toFixed(1)} MB)`);
+    const meta = msg.meta || jobs.get(msg.id) || {};
+    if (meta.kind === 'reel') addReelCard(url, msg.id, blob);
+    else addClipCard(url, msg.id, meta.start || 0, meta.end || 0, blob);
+    log(`Clip ${msg.id} ready (${(blob.size / 1024 / 1024).toFixed(1)} MB)`);
     setStatus('Clip ready. Download it from the Clip Reel.');
-    send({ type: 'clipReady', job });
+    send({ type: 'clipReady', job: msg.id });
   }
 };
 
@@ -115,56 +181,189 @@ ffmpegWorker.onerror = (event) => {
   setStatus('FFmpeg worker failed. Try reloading the page.');
 };
 
-function addClipCard(url, job) {
+function addClipCard(url, job, start, end, blob) {
   const reel = el('clips');
   const empty = reel.querySelector('.empty');
   if (empty) empty.remove();
 
+  clips.push({ blob, url, start, end, job });
+
   const card = document.createElement('div');
   card.className = 'clip-card';
 
+  const row = document.createElement('div');
+  row.className = 'clip-row';
+  const meta = document.createElement('small');
+  meta.textContent = `clip ${job} [${formatTime(start)} -> ${formatTime(end)}]`;
   const link = document.createElement('a');
   link.href = url;
   link.download = `syncwatch-highlight-${job}.mp4`;
   link.textContent = 'DOWNLOAD';
+  row.append(meta, link);
 
-  const meta = document.createElement('small');
-  meta.textContent = `clip ${job}`;
+  const seekBtn = document.createElement('button');
+  seekBtn.className = 'btn tiny ghost';
+  seekBtn.textContent = 'SEEK TO';
+  seekBtn.addEventListener('click', () => seekTo(start));
 
-  card.append(link, meta);
+  card.append(row, seekBtn);
   reel.prepend(card);
-  while (reel.children.length > 8) reel.lastChild.remove();
+  while (reel.children.length > 10) reel.lastChild.remove();
+}
+
+function addReelCard(url, job, blob) {
+  const reel = el('clips');
+  const card = document.createElement('div');
+  card.className = 'clip-card';
+  const row = document.createElement('div');
+  row.className = 'clip-row';
+  const meta = document.createElement('small');
+  meta.textContent = `FULL REEL [${formatTime(0)} -> ${formatTime(blob.size / 40000)}]`;
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `syncwatch-reel-${job}.mp4`;
+  link.textContent = 'DOWNLOAD REEL';
+  row.append(meta, link);
+  card.append(row);
+  reel.prepend(card);
+}
+
+function buildScreenBuffer(seconds) {
+  const cutoff = Date.now() - seconds * 1000;
+  let selected = screenChunks.filter((chunk) => chunk.t >= cutoff);
+  if (!selected.length) selected = screenChunks.slice(-5);
+  if (!selected.length) return null;
+
+  const size = selected.reduce((sum, chunk) => sum + chunk.data.length, 0);
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of selected) {
+    bytes.set(chunk.data, offset);
+    offset += chunk.data.length;
+  }
+  const duration = Math.max(1, (selected[selected.length - 1].t - selected[0].t) / 1000);
+  return { buffer: bytes.buffer, duration };
 }
 
 function clipAt(time) {
-  const duration = Number(el('clipDuration').value) || 8;
-  const src = video.currentSrc || video.src || document.querySelector('.tab.active')?.dataset.src;
-  if (!src) {
-    setStatus('Load a sample video first.');
+  const requested = Number(el('clipDuration').value) || 8;
+  const start = Math.max(0, time - 4);
+  const end = start + requested;
+  const job = ++ffmpegJob;
+  jobs.set(job, { start, end });
+  activeJobs.add(job);
+
+  setStatus(`Preparing clip ${formatTime(start)} -> ${formatTime(end)}...`);
+  log(`Clipping ${formatTime(start)} to ${formatTime(end)}`);
+
+  if (currentSource.kind === 'screen' && screenChunks.length) {
+    const buffered = buildScreenBuffer(requested + 4);
+    if (!buffered) {
+      activeJobs.delete(job);
+      setStatus('Screen buffer is empty. Wait a moment and try again.');
+      return;
+    }
+    ffmpegWorker.postMessage({
+      id: job,
+      cmd: 'clip',
+      buffer: buffered.buffer,
+      ext: 'webm',
+      start: 0,
+      duration: buffered.duration,
+      meta: { start: Math.max(0, end - buffered.duration), end }
+    }, [buffered.buffer]);
     return;
   }
 
-  const job = ++ffmpegJob;
-  activeJobs.add(job);
-  const absolute = new URL(src, location.href).href;
-  const start = Math.max(0, Number(time) || 0);
+  const src = currentSource.src || video.currentSrc || document.querySelector('.tab.active')?.dataset.src;
+  if (!src) {
+    activeJobs.delete(job);
+    setStatus('Load a video first.');
+    return;
+  }
+  ffmpegWorker.postMessage({
+    id: job,
+    cmd: 'clip',
+    src: new URL(src, location.href).href,
+    start,
+    duration: requested,
+    meta: { start, end }
+  });
+}
 
-  setStatus(`Preparing clip ${formatTime(start)} → ${formatTime(start + duration)}…`);
-  log(`Clipping ${formatTime(start)} to ${formatTime(start + duration)}`);
-  ffmpegWorker.postMessage({ id: job, cmd: 'clip', src: absolute, start, duration });
+function seekTo(seconds) {
+  if (video.srcObject) return;
+  if (!video.duration) return;
+  video.currentTime = Math.min(Math.max(0, seconds), video.duration);
+  sync.markLocalChange();
+  setStatus(`Seeked to ${formatTime(seconds)}`);
+}
+
+function appendChat(msg) {
+  const box = el('chatMessages');
+  const empty = box.querySelector('.empty');
+  if (empty) empty.remove();
+
+  const line = document.createElement('div');
+  line.className = 'chat-line';
+
+  const badge = document.createElement('span');
+  badge.className = 'chat-badge';
+  badge.style.setProperty('--chat-color', colorFor(msg.from));
+  badge.textContent = `${String(msg.from).slice(0, 4)}:`;
+
+  line.append(badge);
+
+  const parts = String(msg.text || '').split(/(@\d{1,2}:\d{2})/g);
+  for (const part of parts) {
+    if (/^@\d{1,2}:\d{2}$/.test(part)) {
+      const [minutes, seconds] = part.slice(1).split(':').map(Number);
+      const button = document.createElement('button');
+      button.className = 'chat-stamp';
+      button.textContent = part;
+      button.addEventListener('click', () => seekTo(minutes * 60 + seconds));
+      line.append(button);
+    } else if (part) {
+      line.append(document.createTextNode(part));
+    }
+  }
+
+  box.append(line);
+  while (box.children.length > 50) box.firstChild.remove();
+  box.scrollTop = box.scrollHeight;
+}
+
+function addReaction(emoji, time, from, local) {
+  const duration = video.duration || 0;
+  const marker = document.createElement('span');
+  marker.className = 'reaction-marker';
+  marker.textContent = emoji;
+  marker.style.left = duration ? `${Math.min(99, (time / duration) * 100)}%` : '2%';
+  el('reactionStrip').append(marker);
+
+  const float = document.createElement('div');
+  float.className = 'floating-reaction';
+  float.textContent = emoji;
+  float.style.left = `${18 + Math.random() * 60}%`;
+  el('floatLayer').append(float);
+  setTimeout(() => float.remove(), 1900);
+
+  log(`${from.slice(0, 6)} reacted ${formatStamp(time)} ${emoji}`);
+  if (local) send({ type: 'reaction', emoji, videoTime: time });
 }
 
 function updatePresence(msg) {
-  const peers = msg.clients || [];
-  el('guestVal').textContent = String(msg.count || peers.length);
+  peerIds = msg.clients || [];
+  el('guestVal').textContent = String(msg.count || peerIds.length);
   const container = el('presence');
   container.innerHTML = '';
 
-  for (const id of peers) {
+  for (const id of peerIds) {
     const row = document.createElement('div');
     row.className = 'peer' + (id === msg.hostId ? ' host' : '');
+    row.style.setProperty('--peer-color', colorFor(id));
     const name = document.createElement('span');
-    name.textContent = id === clientId ? 'You' : `Peer ${id}`;
+    name.textContent = id === clientId ? 'You' : `Peer ${id.slice(0, 6)}`;
     const role = document.createElement('span');
     role.textContent = id === msg.hostId ? 'HOST' : 'GUEST';
     row.append(name, role);
@@ -177,7 +376,156 @@ function setRole(host) {
   sync.setHost(host);
   el('hostState').textContent = host ? 'HOST' : 'GUEST';
   el('hostState').className = host ? 'on' : '';
-  el('syncTag').textContent = `ROOM ${roomCode} · ${host ? 'HOST' : 'GUEST'}`;
+  el('syncTag').textContent = `ROOM ${roomCode} - ${host ? 'HOST' : 'GUEST'}`;
+}
+
+function setSample(src, name, broadcast = true) {
+  stopScreenShare(false);
+  video.srcObject = null;
+  video.muted = false;
+  video.src = src;
+  video.load();
+  currentSource = { kind: 'sample', src, name };
+  document.querySelectorAll('.tab').forEach((tab) => {
+    tab.classList.toggle('active', tab.dataset.src === src);
+  });
+  if (broadcast && isHost) {
+    send({ type: 'mediaSource', source: { kind: 'sample', src, name } });
+  }
+}
+
+function loadUrl(rawUrl, broadcast = true) {
+  const url = String(rawUrl || '').trim();
+  if (!/^https?:\/\//i.test(url)) {
+    setStatus('Enter a direct http(s) .mp4 or .webm URL.');
+    return;
+  }
+  video.srcObject = null;
+  video.muted = false;
+  video.src = url;
+  video.load();
+  currentSource = { kind: 'url', src: url, name: url.split('/').pop() || 'remote video' };
+  document.querySelectorAll('.tab').forEach((tab) => tab.classList.remove('active'));
+  setStatus(`Loading ${currentSource.name}`);
+  log(`Loaded URL: ${url.slice(0, 100)}`);
+  if (broadcast && isHost) {
+    send({ type: 'mediaSource', source: { kind: 'url', url, name: currentSource.name } });
+  }
+}
+
+function loadFile(file, broadcast = true) {
+  if (!file || !/video\/(mp4|webm)/.test(file.type || '')) {
+    setStatus('Choose an .mp4 or .webm file.');
+    return;
+  }
+  video.srcObject = null;
+  video.muted = false;
+  const url = URL.createObjectURL(file);
+  video.src = url;
+  video.load();
+  currentSource = { kind: 'local', src: url, name: file.name, size: file.size };
+  document.querySelectorAll('.tab').forEach((tab) => tab.classList.remove('active'));
+  setStatus(`Loaded local file ${file.name}. Only you can access this file; peers see a notice.`);
+  log(`Loaded local file ${file.name} (${(file.size / 1024 / 1024).toFixed(1)} MB)`);
+  if (broadcast && isHost) {
+    send({ type: 'mediaSource', source: { kind: 'local', name: file.name, size: file.size } });
+  }
+}
+
+function handleMediaSource(msg) {
+  if (msg.from === clientId) return;
+  const source = msg.source || {};
+  if (source.kind === 'sample') {
+    setSample(source.src, source.name || 'SAMPLE', false);
+    setStatus('Host switched to a built-in sample.');
+  } else if (source.kind === 'url') {
+    loadUrl(source.url, false);
+    setStatus('Host switched to a direct video URL.');
+  } else if (source.kind === 'local') {
+    currentSource = { kind: 'local', src: '', name: source.name };
+    setStatus(`Host is playing a local file: ${source.name}. Peers cannot access local files.`);
+  } else if (source.kind === 'screen') {
+    currentSource = { kind: 'screen', hostId: msg.from };
+    video.pause();
+    video.srcObject = null;
+    setStatus('Host is sharing their screen. Waiting for the live stream...');
+    if (pendingScreenStream) attachScreenStream(pendingScreenStream);
+  }
+}
+
+async function startScreenShare() {
+  if (!isHost) {
+    setStatus('Only the room host can share a screen.');
+    return;
+  }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+    setStatus('Screen sharing is not supported in this browser.');
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getDisplayMedia({
+      video: { frameRate: 30 },
+      audio: true
+    });
+    sharing = true;
+    el('shareBtn').textContent = 'STOP SHARE';
+    currentSource = { kind: 'screen', hostId: clientId };
+
+    video.src = '';
+    video.removeAttribute('src');
+    video.srcObject = stream;
+    video.muted = true;
+    await video.play();
+
+    try {
+      const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp8,opus')
+        ? 'video/webm;codecs=vp8,opus'
+        : 'video/webm';
+      screenChunks = [];
+      screenRecorder = new MediaRecorder(stream, { mimeType });
+      screenRecorder.ondataavailable = (event) => {
+        if (event.data && event.data.size) {
+          event.data.arrayBuffer().then((buffer) => {
+            screenChunks.push({ t: Date.now(), data: new Uint8Array(buffer) });
+            const cutoff = Date.now() - 30000;
+            screenChunks = screenChunks.filter((chunk) => chunk.t >= cutoff);
+          });
+        }
+      };
+      screenRecorder.start(2000);
+      log('Rolling screen clip buffer started');
+    } catch (error) {
+      log(`MediaRecorder unavailable: ${error.message}`);
+    }
+
+    await rtc.startScreenShare(stream);
+    send({ type: 'mediaSource', source: { kind: 'screen', hostId: clientId } });
+    setStatus('Sharing your screen. Audio is muted locally to prevent echo.');
+
+    const track = stream.getVideoTracks()[0];
+    if (track) {
+      track.onended = () => stopScreenShare(true);
+    }
+  } catch (error) {
+    log(`Screen share failed: ${error.message}`);
+    setStatus(`Screen share failed: ${error.message}`);
+  }
+}
+
+function stopScreenShare(fromBrowser = false) {
+  if (!sharing) return;
+  sharing = false;
+  el('shareBtn').textContent = 'SHARE SCREEN';
+  if (screenRecorder && screenRecorder.state !== 'inactive') screenRecorder.stop();
+  screenRecorder = null;
+  screenChunks = [];
+  rtc.stopScreenShare();
+  video.srcObject = null;
+  video.muted = false;
+  const tab = document.querySelector('.tab.active');
+  setSample(tab.dataset.src, tab.textContent.trim(), true);
+  if (fromBrowser) log('Screen share stopped from browser controls');
+  setStatus('Screen share stopped. Normal playback restored.');
 }
 
 function connect() {
@@ -187,7 +535,7 @@ function connect() {
   ws.onopen = () => {
     el('netState').textContent = 'ONLINE';
     el('netState').className = 'on';
-    setStatus('Connected. Syncing clock with the room server…');
+    setStatus('Connected. Syncing clock with the room server...');
     send({ type: 'join', room: roomCode, clientId });
     sync.start();
   };
@@ -195,7 +543,7 @@ function connect() {
   ws.onclose = () => {
     el('netState').textContent = 'OFFLINE';
     el('netState').className = 'off';
-    setStatus('Disconnected. Reconnecting…');
+    setStatus('Disconnected. Reconnecting...');
     sync.stop();
     setTimeout(connect, 1500);
   };
@@ -238,7 +586,7 @@ function connect() {
     }
 
     if (msg.type === 'state') {
-      sync.handleState(msg);
+      if (currentSource.kind !== 'screen') sync.handleState(msg);
       return;
     }
 
@@ -249,6 +597,26 @@ function connect() {
 
     if (msg.type === 'clearStrokes') {
       teles.clear(false);
+      return;
+    }
+
+    if (msg.type === 'chat') {
+      appendChat(msg);
+      return;
+    }
+
+    if (msg.type === 'reaction') {
+      addReaction(msg.emoji, msg.videoTime, msg.from, false);
+      return;
+    }
+
+    if (msg.type === 'mediaSource') {
+      handleMediaSource(msg);
+      return;
+    }
+
+    if (msg.type.startsWith('rtc-')) {
+      rtc.handleSignal(msg);
       return;
     }
 
@@ -277,6 +645,10 @@ el('joinBtn').addEventListener('click', () => {
 });
 
 el('playBtn').addEventListener('click', () => {
+  if (currentSource.kind === 'screen') {
+    setStatus('Screen share is live; play/pause is controlled by the sharing browser.');
+    return;
+  }
   if (video.paused) video.play().catch(() => {});
   else video.pause();
 });
@@ -294,43 +666,84 @@ video.addEventListener('pause', () => {
 seek.addEventListener('pointerdown', () => { isSeeking = true; });
 seek.addEventListener('pointerup', () => { isSeeking = false; });
 seek.addEventListener('input', () => {
-  if (!video.duration) return;
+  if (!video.duration || video.srcObject) return;
   video.currentTime = (Number(seek.value) / 1000) * video.duration;
   el('timeLabel').textContent = `${formatTime(video.currentTime)} / ${formatTime(video.duration)}`;
 });
 seek.addEventListener('change', () => sync.markLocalChange());
 
 video.addEventListener('timeupdate', () => {
-  if (!isSeeking && video.duration) {
+  if (!isSeeking && video.duration && !video.srcObject) {
     seek.value = String(Math.round((video.currentTime / video.duration) * 1000));
   }
-  el('timeLabel').textContent = `${formatTime(video.currentTime)} / ${formatTime(video.duration)}`;
+  el('timeLabel').textContent = `${formatTime(video.currentTime)} / ${formatTime(video.duration || 0)}`;
 });
 
-video.addEventListener('loadedmetadata', () => sync.markLocalChange());
+video.addEventListener('loadedmetadata', () => {
+  sync.markLocalChange();
+  if (currentSource.kind === 'local') {
+    log(`Local file duration ${formatTime(video.duration)}`);
+  }
+});
+
+video.addEventListener('error', () => {
+  if (currentSource.kind === 'url') {
+    setStatus('Remote URL could not be loaded. Check that it is a direct .mp4/.webm link.');
+  }
+});
 
 document.querySelectorAll('.tab').forEach((tab) => {
-  tab.addEventListener('click', () => {
-    document.querySelectorAll('.tab').forEach((t) => t.classList.remove('active'));
-    tab.classList.add('active');
-    video.src = tab.dataset.src;
-    video.load();
-    teles.clear(true);
-    log(`Loaded sample: ${tab.textContent.trim()}`);
-    setStatus(`Loaded ${tab.textContent.trim()}. Press PLAY to sync the room.`);
-  });
+  tab.addEventListener('click', () => setSample(tab.dataset.src, tab.textContent.trim(), true));
 });
 
-el('penBtn').addEventListener('click', (e) => {
+el('loadUrlBtn').addEventListener('click', () => loadUrl(el('urlInput').value, true));
+el('urlInput').addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') loadUrl(el('urlInput').value, true);
+});
+
+el('fileInput').addEventListener('change', (event) => {
+  loadFile(event.target.files[0], true);
+});
+
+screen.addEventListener('dragover', (event) => {
+  event.preventDefault();
+  screen.classList.add('dragover');
+});
+screen.addEventListener('dragleave', () => screen.classList.remove('dragover'));
+screen.addEventListener('drop', (event) => {
+  event.preventDefault();
+  screen.classList.remove('dragover');
+  loadFile(event.dataTransfer.files[0], true);
+});
+
+el('shareBtn').addEventListener('click', () => {
+  if (sharing) stopScreenShare(false);
+  else startScreenShare();
+});
+
+el('penBtn').addEventListener('click', (event) => {
   const tool = teles.setTool('pen');
-  e.currentTarget.classList.toggle('active', tool === 'pen');
+  event.currentTarget.classList.toggle('active', tool === 'pen');
   el('arrowBtn').classList.remove('active');
 });
 
-el('arrowBtn').addEventListener('click', (e) => {
+el('arrowBtn').addEventListener('click', (event) => {
   const tool = teles.setTool('arrow');
-  e.currentTarget.classList.toggle('active', tool === 'arrow');
+  event.currentTarget.classList.toggle('active', tool === 'arrow');
   el('penBtn').classList.remove('active');
+});
+
+document.querySelectorAll('.swatch').forEach((swatch) => {
+  swatch.addEventListener('click', () => {
+    document.querySelectorAll('.swatch').forEach((s) => s.classList.remove('active'));
+    swatch.classList.add('active');
+    teles.setColor(swatch.dataset.color);
+  });
+});
+
+el('fadeToggle').addEventListener('change', (event) => {
+  teles.setAutoFade(event.target.checked);
+  log(`Auto-fade ${event.target.checked ? 'on' : 'off'}`);
 });
 
 el('clearBtn').addEventListener('click', () => {
@@ -340,16 +753,79 @@ el('clearBtn').addEventListener('click', () => {
   log('Canvas cleared for everyone');
 });
 
-el('clipBtn').addEventListener('click', () => {
-  consensus.vote(video.currentTime);
-  log('Voted to clip this moment');
-  setStatus('Clip vote sent. Waiting for the room threshold…');
+document.querySelectorAll('.reaction').forEach((button) => {
+  button.addEventListener('click', () => {
+    addReaction(button.dataset.emoji, video.currentTime || 0, clientId, true);
+  });
 });
 
-el('clipNowBtn').addEventListener('click', () => clipAt(video.currentTime));
+el('chatForm').addEventListener('submit', (event) => {
+  event.preventDefault();
+  const input = el('chatInput');
+  const text = input.value.trim();
+  if (!text) return;
+  send({ type: 'chat', text, videoTime: video.currentTime || 0 });
+  input.value = '';
+});
+
+el('clipBtn').addEventListener('click', () => {
+  consensus.vote(video.currentTime || 0);
+  log('Voted to clip this moment');
+  setStatus('Clip vote sent. Waiting for the room threshold...');
+});
+
+el('clipNowBtn').addEventListener('click', () => clipAt(video.currentTime || 0));
+
+el('stitchBtn').addEventListener('click', async () => {
+  if (clips.length < 2) {
+    setStatus('Add at least two clips to the reel before stitching.');
+    return;
+  }
+  const job = ++ffmpegJob;
+  const buffers = [];
+  for (const clip of clips) buffers.push(await clip.blob.arrayBuffer());
+  activeJobs.add(job);
+  setStatus('Stitching the highlight reel...');
+  ffmpegWorker.postMessage({ id: job, cmd: 'stitch', buffers, meta: { kind: 'reel' } }, buffers);
+});
+
+el('joinCallBtn').addEventListener('click', async () => {
+  if (callJoined) {
+    rtc.leave();
+    callJoined = false;
+    el('callTiles').innerHTML = '';
+    el('joinCallBtn').textContent = 'JOIN CALL';
+    el('muteBtn').disabled = true;
+    el('camBtn').disabled = true;
+    return;
+  }
+  try {
+    const stream = await rtc.joinCall();
+    renderCallTile(clientId, 'cam', stream, true);
+    callJoined = true;
+    el('joinCallBtn').textContent = 'LEAVE CALL';
+    el('muteBtn').disabled = false;
+    el('camBtn').disabled = false;
+    setStatus('Call joined. Local preview is muted.');
+  } catch (error) {
+    log(`Could not join call: ${error.message}`);
+    setStatus(`Could not join call: ${error.message}`);
+  }
+});
+
+el('muteBtn').addEventListener('click', () => {
+  const muted = rtc.toggleMic();
+  el('muteBtn').textContent = muted ? 'UNMUTE' : 'MIC MUTE';
+});
+
+el('camBtn').addEventListener('click', () => {
+  const off = rtc.toggleCam();
+  el('camBtn').textContent = off ? 'CAM ON' : 'CAM TOGGLE';
+});
 
 new ResizeObserver(() => teles.resize()).observe(screen);
 
-video.src = document.querySelector('.tab.active').dataset.src;
+currentSource.src = document.querySelector('.tab.active').dataset.src;
+video.src = currentSource.src;
 teles.resize();
 connect();

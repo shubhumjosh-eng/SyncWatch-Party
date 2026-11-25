@@ -27,7 +27,7 @@ const MIME = {
 // resource same-origin and isolate the page so it is available.
 const SECURITY_HEADERS = {
   'Cross-Origin-Opener-Policy': 'same-origin',
-  'Cross-Origin-Embedder-Policy': 'require-corp',
+  'Cross-Origin-Embedder-Policy': 'credentialless',
   'Cross-Origin-Resource-Policy': 'same-origin'
 };
 
@@ -101,6 +101,7 @@ const server = http.createServer((req, res) => {
 });
 
 const rooms = new Map();
+const clientsById = new Map();
 
 function getRoom(code) {
   if (!rooms.has(code)) {
@@ -170,6 +171,7 @@ wss.on('connection', (ws) => {
 
       clientId = String(msg.clientId || Math.random().toString(36).slice(2, 8));
       if (room) room.clients.delete(clientId);
+      clientsById.set(clientId, ws);
 
       room = getRoom(code);
       if (!room.host) room.host = clientId;
@@ -223,6 +225,52 @@ wss.on('connection', (ws) => {
       return;
     }
 
+    if (msg.type === 'chat') {
+      broadcast(room, {
+        type: 'chat',
+        from: clientId,
+        text: String(msg.text || '').slice(0, 500),
+        videoTime: Number(msg.videoTime) || 0,
+        ts: Date.now()
+      });
+      return;
+    }
+
+    if (msg.type === 'reaction') {
+      broadcast(room, {
+        type: 'reaction',
+        from: clientId,
+        emoji: String(msg.emoji || '').slice(0, 8),
+        videoTime: Number(msg.videoTime) || 0,
+        ts: Date.now()
+      });
+      return;
+    }
+
+    if (msg.type === 'mediaSource') {
+      if (clientId !== room.host) return;
+      broadcast(room, { type: 'mediaSource', from: clientId, source: msg.source }, ws);
+      return;
+    }
+
+    if (msg.type.startsWith('rtc-')) {
+      const payload = {
+        type: msg.type,
+        from: clientId,
+        to: msg.to,
+        kind: msg.kind,
+        description: msg.description,
+        candidate: msg.candidate
+      };
+      if (msg.to) {
+        const target = clientsById.get(String(msg.to));
+        if (target) send(target, payload);
+      } else {
+        broadcast(room, payload, ws);
+      }
+      return;
+    }
+
     if (msg.type === 'clipVote') {
       const now = Date.now();
       room.votes = room.votes.filter((v) => now - v.at < 5000);
@@ -255,6 +303,7 @@ wss.on('connection', (ws) => {
     clearInterval(heartbeat);
     if (!room || !clientId) return;
     room.clients.delete(clientId);
+    clientsById.delete(clientId);
     if (room.host === clientId) {
       room.host = room.clients.keys().next().value || null;
       broadcast(room, { type: 'hostChanged', hostId: room.host });

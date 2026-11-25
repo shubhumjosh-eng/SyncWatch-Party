@@ -1,6 +1,6 @@
 # SyncWatch Party
 
-A zero-install, real-time co-op watch room. Friends join the same room code, watch in sync, draw on a shared canvas, and clip a highlight that is encoded entirely in the browser with FFmpeg.wasm.
+A zero-install, real-time co-op watch room. Friends join the same room code, watch in sync, chat with timestamped messages, take a voice/video call, share a screen or tab, draw together, react on a timeline, and cut highlight clips that are encoded entirely in the browser with FFmpeg.wasm.
 
 Built for the **CSC Winter Sparkathon** — technology that helps people share an experience.
 
@@ -11,48 +11,63 @@ npm install
 npm start
 ```
 
-Open `http://localhost:3000`. Open a second tab (or share your LAN URL) with the same room code to see sync, presence, drawing, and consensus clipping.
+Open `http://localhost:3000`. Open a second tab (or share your LAN URL) with the same room code to see sync, presence, chat, drawing, reactions, calls, and clipping.
 
 ## One-minute judge demo
 
 1. Open `http://localhost:3000?room=SPARK` in two tabs.
 2. Both tabs show `ONLINE`; the first tab is `HOST`.
-3. Press **PLAY** in the host tab. The guest tab starts within a few hundred milliseconds. Telemetry badges show offset, RTT, and drift.
-4. Press **PEN** or **ARROW** and draw on the video. The stroke appears in the other tab.
-5. Press **CLIP THAT** in both tabs within five seconds. Consensus triggers and both browsers produce an 8-second MP4 with libx264.
-6. Download the MP4 from **CLIP REEL**.
+3. Press **PLAY** in the host tab. The guest tab starts within a few hundred milliseconds.
+4. Type `hello @00:02` in **Room Chat** and press SEND. Click the timestamp to seek.
+5. Press **JOIN CALL** in both tabs to create local camera previews and peer video tiles.
+6. Press **SHARE SCREEN** in the host tab and choose a tab/window. Guests automatically see the live stream.
+7. Press **PEN** or **ARROW** and draw on the video; toggle **AUTO-FADE** and color swatches.
+8. Press **CLIP THAT** in both tabs within five seconds, or use **CLIP NOW**. Both browsers produce an 8-second MP4 with a 4-second pre-roll.
+9. Make two clips, then press **STITCH REEL** to concatenate them into one downloadable MP4.
 
-Use **CLIP NOW** for a single-user demo — it clips immediately without consensus.
+## Features
+
+- **NTP-style sync** — clock offset, RTT, and drift telemetry; host-authoritative play/pause/seek with `playbackRate` correction.
+- **Room chat** — WebSocket broadcast with user color badges and clickable `@MM:SS` timestamps that seek the player.
+- **Reactions** — floating emoji over the video and markers on a timeline reaction strip.
+- **WebRTC call** — camera/mic stream (`kind: 'cam'`) with Join Call, Mic Mute, Cam Toggle, and compact live peer tiles.
+- **Screen share** — host `getDisplayMedia` stream (`kind: 'screen'`), muted locally to prevent echo, with browser-bar stop handling.
+- **Watch anything** — built-in CC0 samples, direct `.mp4`/`.webm` URL input, local file picker, and drag/drop file loading. Host broadcasts `mediaSource` changes to guests.
+- **Telestrator** — normalized `[0..1]` pen and arrow coordinates, color swatches, and 3.5s auto-fade.
+- **Clipping** — consensus or manual clips, a rolling 30-second WebM buffer for live screenshares, and multi-clip reel stitching.
+- **COEP credentialless** — keeps SharedArrayBuffer available for FFmpeg.wasm while allowing external media.
 
 ## Architecture
 
-- `server/index.js` — Node HTTP server + `ws` WebSocket rooms. Relays playback state, strokes, presence, NTP pings, and clip votes. The first client in a room is the host; playback authority stays with the host.
-- `public/js/syncEngine.js` — NTP-style ping/pong clock offset, RTT estimation, target playback time from host state, and small `playbackRate` drift correction. Large errors trigger a seek.
-- `public/js/telestrator.js` — Canvas overlay with normalized `[0..1]` coordinates so strokes line up across screen sizes. Pen and arrow tools.
-- `public/js/clipConsensus.js` — Sliding-window vote detector; the server requires a majority of connected peers within five seconds.
-- `public/js/ffmpegWorker.js` — Web Worker. Loads `@ffmpeg/core` ESM from same-origin blob URLs, writes the sample video into the FFmpeg virtual filesystem, trims it, and returns an MP4 blob.
-- `public/samples/` — Small CC0 sample videos from MDN's interactive examples, bundled so the demo works offline.
-- COOP/COEP headers are set on every response so SharedArrayBuffer is available to FFmpeg.wasm.
+- `server/index.js` — Node HTTP server + `ws` WebSocket rooms. Relays playback state, presence, NTP pings, strokes, chat, reactions, clip votes, media-source changes, and targeted WebRTC signaling (`rtc-offer`, `rtc-answer`, `rtc-ice`, `rtc-leave`, `rtc-meta`).
+- `public/js/syncEngine.js` — NTP offset/RTT, target playback time, seek on large error, drift correction.
+- `public/js/telestrator.js` — canvas overlay with normalized coordinates, color selection, and auto-fade.
+- `public/js/clipConsensus.js` — 5-second majority clip trigger.
+- `public/js/rtcCall.js` — `RTCPeerConnection` with `stun:stun.l.google.com:19302`, one connection per peer per stream kind.
+- `public/js/ffmpegWorker.js` — Web Worker. Loads `@ffmpeg/core` ESM from same-origin blob URLs, clips URL/buffer inputs, and stitches clips with the concat demuxer.
+- `public/js/app.js` — room controller tying sync, chat, reactions, RTC, media sources, telestrator, and clipping together.
+- `public/samples/` — small CC0 sample videos from MDN's interactive examples.
 
 ## Deploying
 
-This app needs a **long-running Node process** for WebSockets. Deploy it on Render, Railway, Fly.io, or any Node host that supports persistent connections and outbound WebSocket upgrades.
+This app needs a **long-running Node process** for WebSockets. Deploy on Railway, Render, Fly.io, or any Node host that supports persistent WebSocket connections.
 
-Vercel/Netlify serverless functions are **not** a good fit for the `ws` server. If you must use them, split the static site from a separate WebSocket service.
+`railway.json` and `render.yaml` are included. The server reads `process.env.PORT`, so no code changes are needed.
 
-Set `PORT` from your host if required; the server already reads `process.env.PORT`.
+Vercel/Netlify serverless functions are **not** a good fit for the `ws` server.
 
 ## Built-in sample attribution
 
-- `flower.mp4` and `friday.mp4` come from MDN's CC0 interactive examples: `https://interactive-examples.mdn.mozilla.net/media/cc0-videos/`.
+`flower.mp4` and `friday.mp4` come from MDN's CC0 interactive examples: `https://interactive-examples.mdn.mozilla.net/media/cc0-videos/`.
 
 ## AI-use disclosure (draft)
 
-> Used an AI coding assistant for architecture planning, scaffolding the Node/WebSocket server, the sync and canvas modules, the FFmpeg.wasm worker, and debugging. All final code was reviewed and tested manually in a browser, including a two-tab sync test and an end-to-end clip encode. No external AI service is called by the submitted app at runtime.
+> Used an AI coding assistant for architecture planning, scaffolding the Node/WebSocket server, the sync and canvas modules, WebRTC signaling, the FFmpeg.wasm worker, the chat/reaction UI, and debugging. All final code was reviewed and tested manually in a browser, including two-tab sync, chat, reactions, local camera preview, clip encoding, and reel stitching. No external AI service is called by the submitted app at runtime.
 
 ## Known limitations
 
 - No authentication or accounts — room codes are lightweight demo identifiers.
+- A guest cannot access another user's local file; the host broadcasts only a notice for local files.
+- Screen clips use a rolling ~30s WebM buffer and depend on browser `MediaRecorder` support.
+- WebRTC call quality depends on the network and the public STUN server.
 - The host is a single point of playback authority; if the host leaves, the next peer becomes host.
-- Clip encoding speed depends on the device; the clip is short and ultrafast to keep the demo reliable.
-- Consensus requires at least two connected viewers. Use **CLIP NOW** when testing solo.

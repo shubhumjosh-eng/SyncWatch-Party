@@ -10,6 +10,8 @@ export class Telestrator {
     this.tool = null;
     this.color = '#56d6c4';
     this.width = 3;
+    this.autoFade = false;
+    this.fadeTimer = null;
     this.strokes = [];
     this.active = null;
     this.lastSent = 0;
@@ -27,6 +29,22 @@ export class Telestrator {
     this.canvas.style.pointerEvents = this.tool ? 'auto' : 'none';
     this.canvas.style.cursor = this.tool ? 'crosshair' : 'default';
     return this.tool;
+  }
+
+  setColor(color) {
+    this.color = color;
+    if (this.active) this.active.color = color;
+    this.render();
+  }
+
+  setAutoFade(enabled) {
+    this.autoFade = !!enabled;
+    clearInterval(this.fadeTimer);
+    this.fadeTimer = null;
+    if (this.autoFade) {
+      this.fadeTimer = setInterval(() => this.render(), 200);
+    }
+    this.render();
   }
 
   resize() {
@@ -56,6 +74,7 @@ export class Telestrator {
       color: this.color,
       width: this.width,
       points: [this.point(e)],
+      createdAt: Date.now(),
       done: false
     };
     this.strokes.push(this.active);
@@ -106,6 +125,7 @@ export class Telestrator {
         color: stroke.color || this.color,
         width: stroke.width || this.width,
         points: Array.isArray(stroke.points) ? stroke.points : [],
+        createdAt: stroke.createdAt || Date.now(),
         done: !!stroke.done
       });
     }
@@ -128,6 +148,7 @@ export class Telestrator {
     this.ctx.lineJoin = 'round';
 
     for (const stroke of this.strokes) {
+      if (this.autoFade && stroke.createdAt && Date.now() - stroke.createdAt > 3500) continue;
       if (!stroke.points || stroke.points.length < 2) continue;
       const pts = stroke.points.map(([x, y]) => [x * w, y * h]);
       this.ctx.strokeStyle = stroke.color;
