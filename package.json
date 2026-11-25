@@ -1,0 +1,16 @@
+{
+  "name": "syncwatch-party",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Zero-install real-time co-op watch room with client-side highlight clipping",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node server/index.js"
+  },
+  "dependencies": {
+    "@ffmpeg/core": "0.12.10",
+    "@ffmpeg/ffmpeg": "0.12.15",
+    "@ffmpeg/util": "0.12.2",
+    "ws": "8.18.0"
+  }
+}
