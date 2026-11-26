@@ -133,6 +133,16 @@ test('screen frames relay only from the host while sharing', async () => {
   assert.equal(received.seq, 3);
   assert.equal(received.data, 'data:image/jpeg;base64,QUJD');
 
+  const webp = onceMessage(guest, (msg) => msg.type === 'screen-frame' && msg.data.startsWith('data:image/webp'));
+  host.send(JSON.stringify({
+    type: 'screen-frame',
+    data: 'data:image/webp;base64,QUJD',
+    w: 640,
+    h: 360,
+    seq: 4
+  }));
+  assert.equal((await webp).seq, 4);
+
   let guestFrames = 0;
   let invalidFrames = 0;
   const listener = (raw) => {

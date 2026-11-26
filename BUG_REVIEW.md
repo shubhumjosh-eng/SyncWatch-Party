@@ -111,7 +111,7 @@ Residual limitations are documented in `README.md` → Known limitations (CORS-d
 
 Two-tab QA confirmed that signaling worked on different networks but WebRTC media did not (blank remote tile) because the app only had STUN and no reliable TURN relay. Public demo TURN credentials were checked and are no longer dependable in 2026.
 
-- Screen video is now sent as compressed JPEG frames over the existing room WebSocket (`screen-frame`), so it relays through Railway/WSS and works across any network without TURN.
+- Screen video is now sent as adaptive WebP/JPEG frames over the existing room WebSocket (`screen-frame`), so it relays through Railway/WSS and works across any network without TURN. It targets ~15 fps, adapts quality to encoded size, and skips frames when the socket backs up.
 - Guests render frames into a canvas-backed video tile; late joiners receive the next frame automatically, and source/host changes tear down the receiver.
 - Camera calls keep WebRTC perfect negotiation and can optionally use TURN via `TURN_URL` / `TURN_USERNAME` / `TURN_CREDENTIAL`; ICE state transitions are logged.
 - Server validates frame host, MIME type, size, dimensions, and sequence; rate limits still apply.

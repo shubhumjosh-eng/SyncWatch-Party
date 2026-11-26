@@ -68,7 +68,7 @@ Set `ALLOWED_ORIGINS` to a comma-separated list of trusted origins if the app is
 
 ### WebRTC / TURN
 
-- **Screen sharing is relayed over the room WebSocket**, not WebRTC, so it works between laptops on different networks without any TURN server. The host sends compressed JPEG frames (~8 fps, capped at 960×540 and 220 KB per frame) and guests render them into a canvas-backed video tile.
+- **Screen sharing is relayed over the room WebSocket**, not WebRTC, so it works between laptops on different networks without any TURN server. The host sends adaptive WebP/JPEG frames (up to ~15 fps, capped at 960×540 and 220 KB per frame) with socket backpressure protection, and guests render them into a canvas-backed video tile.
 - Camera calls still use WebRTC. The server exposes `/rtc-config.json`, which the client loads before creating peer connections.
 - If you want TURN fallback for camera calls, set `TURN_URL` (comma-separated `turn:`/`turns:` URLs), `TURN_USERNAME`, and `TURN_CREDENTIAL` in your host's environment. No credentials are stored in the repo.
 - Leave `TURN_URL` unset for STUN-only camera calls; set it to an empty string to explicitly disable TURN.
@@ -100,7 +100,7 @@ npm run check   # syntax check every JS module
 - No authentication or accounts — room codes are lightweight demo identifiers.
 - A guest cannot access another user's local file; the host broadcasts only a notice for local files.
 - Screen clips use a rolling ~30s WebM buffer and depend on browser `MediaRecorder` support.
-- Screen relay quality depends on the room server's bandwidth and uses ~8 fps JPEG frames rather than a native 30 fps desktop stream. It still carries audio through the separate WebRTC call, not through the relay.
+- Screen relay quality depends on the room server's bandwidth and uses adaptive WebP/JPEG frames up to ~15 fps rather than a native 30 fps desktop stream. It still carries audio through the separate WebRTC call, not through the relay.
 - Camera-call quality still depends on the network; configure your own `TURN_*` credentials if STUN alone fails. Remote call audio starts muted and must be enabled per tile.
 - The host is a single point of playback authority; if the host leaves, the next peer becomes host and the previous screen share is reset.
 - Clipping a remote URL requires that origin to allow cross-origin `fetch` (CORS); playback alone does not. Local files and live screen shares can only be clipped by the device that owns them.

@@ -48,12 +48,20 @@ let screenTxCanvas = null;
 let screenTxCtx = null;
 let screenTxStream = null;
 let screenTxSeq = 0;
+let screenTxMime = 'image/jpeg';
+let screenTxQuality = 0.55;
+let screenTxFrames = 0;
+let screenTxBytes = 0;
+let screenTxStatsAt = 0;
 let screenRxCanvas = null;
 let screenRxCtx = null;
 let screenRxStream = null;
 let screenRxHost = null;
 let screenRxSeq = 0;
 let screenRxDraw = 0;
+let screenRxFrames = 0;
+let screenRxBytes = 0;
+let screenRxStatsAt = 0;
 
 const COLORS = ['#56d6c4', '#f0b85a', '#ff7a7a', '#6aa9ff', '#d6a6ff', '#8bd450'];
 
@@ -609,6 +617,9 @@ function stopScreenTransmitter() {
   screenTxCanvas = null;
   screenTxCtx = null;
   screenTxSeq = 0;
+  screenTxFrames = 0;
+  screenTxBytes = 0;
+  screenTxStatsAt = 0;
   const tile = el('callTiles').querySelector(`[data-key="${clientId}:screen:local"]`);
   if (tile) tile.remove();
 }
@@ -628,17 +639,30 @@ function startScreenTransmitter(stream) {
   const ratio = Math.min(1, 960 / sourceW, 540 / sourceH);
   screenTxCanvas.width = Math.max(16, Math.round(sourceW * ratio));
   screenTxCanvas.height = Math.max(16, Math.round(sourceH * ratio));
-  screenTxStream = screenTxCanvas.captureStream(12);
+  const webpProbe = screenTxCanvas.toDataURL('image/webp', 0.5);
+  screenTxMime = webpProbe.startsWith('data:image/webp') ? 'image/webp' : 'image/jpeg';
+  screenTxQuality = screenTxMime === 'image/webp' ? 0.62 : 0.55;
+  screenTxStream = screenTxCanvas.captureStream(15);
+  screenTxStatsAt = Date.now();
   renderCallTile(clientId, 'screen', screenTxStream, true);
 
-  // One JPEG frame every 120ms keeps signaling well under the server's rate
-  // limit while staying smooth enough for a shared screen.
+  // ~15 fps stays under the server's 200 msg/10s limit. Quality adapts to the
+  // encoded frame size, and a buffered socket skips frames instead of queuing.
   screenTxTimer = setInterval(() => {
     if (!sharing || !screenTxCtx || !video.videoWidth || ws.readyState !== 1) return;
+    if (ws.bufferedAmount > 512 * 1024) return;
     screenTxCtx.drawImage(video, 0, 0, screenTxCanvas.width, screenTxCanvas.height);
-    let data = screenTxCanvas.toDataURL('image/jpeg', 0.55);
-    if (data.length > 220_000) data = screenTxCanvas.toDataURL('image/jpeg', 0.35);
-    if (data.length > 220_000) return;
+    let data = screenTxCanvas.toDataURL(screenTxMime, screenTxQuality);
+    if (data.length > 200_000) {
+      data = screenTxCanvas.toDataURL(screenTxMime, Math.max(0.3, screenTxQuality - 0.12));
+    }
+    if (data.length > 220_000) {
+      screenTxQuality = Math.max(0.28, screenTxQuality - 0.1);
+      return;
+    }
+    if (data.length > 130_000) screenTxQuality = Math.max(0.3, screenTxQuality - 0.05);
+    else if (data.length < 65_000) screenTxQuality = Math.min(0.78, screenTxQuality + 0.02);
+
     screenTxSeq += 1;
     send({
       type: 'screen-frame',
@@ -647,8 +671,19 @@ function startScreenTransmitter(stream) {
       w: screenTxCanvas.width,
       h: screenTxCanvas.height
     });
-  }, 120);
-  log('Screen relay started over the room connection');
+
+    screenTxFrames += 1;
+    screenTxBytes += data.length;
+    const now = Date.now();
+    if (now - screenTxStatsAt >= 5000) {
+      const seconds = (now - screenTxStatsAt) / 1000;
+      log(`Screen relay ${(screenTxFrames / seconds).toFixed(1)} fps, ${Math.round(screenTxBytes / screenTxFrames / 1024)} KB/frame`);
+      screenTxFrames = 0;
+      screenTxBytes = 0;
+      screenTxStatsAt = now;
+    }
+  }, 67);
+  log(`Screen relay started (${screenTxMime.slice(6)}, adaptive quality)`);
 }
 
 function stopScreenReceiver() {
@@ -658,6 +693,9 @@ function stopScreenReceiver() {
   screenRxCtx = null;
   screenRxHost = null;
   screenRxSeq = 0;
+  screenRxFrames = 0;
+  screenRxBytes = 0;
+  screenRxStatsAt = 0;
   screenRxDraw += 1;
   for (const tile of [...el('callTiles').children]) {
     if (tile.dataset.key.endsWith(':screen:remote')) tile.remove();
@@ -671,6 +709,17 @@ function handleScreenFrame(msg) {
   const seq = Number(msg.seq) || 0;
   if (seq <= screenRxSeq) return;
   screenRxSeq = seq;
+  screenRxFrames += 1;
+  screenRxBytes += msg.data.length;
+  const now = Date.now();
+  if (!screenRxStatsAt) screenRxStatsAt = now;
+  if (now - screenRxStatsAt >= 5000) {
+    const seconds = (now - screenRxStatsAt) / 1000;
+    log(`Screen relay ${(screenRxFrames / seconds).toFixed(1)} fps, ${Math.round(screenRxBytes / screenRxFrames / 1024)} KB/frame`);
+    screenRxFrames = 0;
+    screenRxBytes = 0;
+    screenRxStatsAt = now;
+  }
 
   if (!screenRxCanvas || screenRxHost !== msg.from) {
     stopScreenReceiver();
@@ -682,7 +731,7 @@ function handleScreenFrame(msg) {
     screenRxCtx = screenRxCanvas.getContext('2d', { alpha: false });
     screenRxCanvas.width = Math.max(16, Number(msg.w) || 960);
     screenRxCanvas.height = Math.max(16, Number(msg.h) || 540);
-    screenRxStream = screenRxCanvas.captureStream(12);
+    screenRxStream = screenRxCanvas.captureStream(20);
     screenRxHost = msg.from;
     renderCallTile(msg.from, 'screen', screenRxStream, false);
     attachScreenStream(screenRxStream, msg.from);
@@ -697,6 +746,7 @@ function handleScreenFrame(msg) {
   screenRxDraw += 1;
   const drawId = screenRxDraw;
   const img = new Image();
+  img.decoding = 'async';
   img.onload = () => {
     if (drawId === screenRxDraw && screenRxCtx) {
       screenRxCtx.drawImage(img, 0, 0, screenRxCanvas.width, screenRxCanvas.height);
