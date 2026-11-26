@@ -4,6 +4,13 @@ A zero-install, real-time co-op watch room. Friends join the same room code, wat
 
 Built for the **CSC Winter Sparkathon** — technology that helps people share an experience.
 
+## Links
+
+- **Live demo:** https://syncwatch-party-production.up.railway.app
+- **Source code:** https://github.com/shubhumjosh-eng/SyncWatch-Party
+- **Demo video:** `assets/demo.mp4` (18s; upload to YouTube/Vimeo for Devpost)
+- **Devpost copy and checklist:** `DEVPOST_SUBMISSION.md`
+
 ## Quick start
 
 ```bash
@@ -63,6 +70,12 @@ Vercel/Netlify serverless functions are **not** a good fit for the `ws` server.
 ## AI-use disclosure (draft)
 
 > Used an AI coding assistant for architecture planning, scaffolding the Node/WebSocket server, the sync and canvas modules, WebRTC signaling, the FFmpeg.wasm worker, the chat/reaction UI, and debugging. All final code was reviewed and tested manually in a browser, including two-tab sync, chat, reactions, local camera preview, clip encoding, and reel stitching. No external AI service is called by the submitted app at runtime.
+
+## Screenshots
+
+- `assets/devpost-home.png` — main room UI.
+- `assets/devpost-two-tabs.png` — host view with two peers and playback.
+- `assets/devpost-features.png` — guest view with chat, reactions, and peer list.
 
 ## Known limitations
 
