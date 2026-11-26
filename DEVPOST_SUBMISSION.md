@@ -26,7 +26,7 @@ A zero-install co-op watch room with real-time sync, timestamped chat, reactions
 
 Watching something with friends usually means one person screenshares and everyone else watches out of sync — pausing, rewinding, and missing the same moments. SyncWatch Party fixes that with a link and a room code: everyone lands in the same room, the host controls playback, and every browser converges on the same timestamp using NTP-style offset, RTT, and drift measurements.
 
-The room is built as a small Node WebSocket server plus a vanilla HTML/CSS/JavaScript client. It relays presence, playback commands, chat, reactions, telestrator strokes, clip votes, media-source changes, and WebRTC signaling. The client adds a live timeline of reactions, clickable `@MM:SS` chat timestamps that seek the video, camera/mic peer calls, host screen share, and a canvas overlay for drawing together over the video.
+The room is built as a small Node WebSocket server plus a vanilla HTML/CSS/JavaScript client. It relays presence, playback commands, chat, reactions, telestrator strokes, clip votes, media-source changes, camera-call signaling, and compressed screen-share frames. The client adds a live timeline of reactions, clickable `@MM:SS` chat timestamps that seek the video, camera/mic peer calls, host screen share that works across different networks without TURN, and a canvas overlay for drawing together over the video.
 
 The most technically interesting part is clipping. Viewers can vote on a moment with **CLIP THAT** within a five-second window, or trigger **CLIP NOW** manually. Each browser encodes an eight-second MP4 with a four-second pre-roll using FFmpeg.wasm inside a Web Worker, then multiple clips can be stitched into one reel. Everything runs client-side, so no video ever leaves the participants' machines.
 
@@ -39,6 +39,7 @@ I built this solo to make shared viewing feel like being in the same room — lo
 - Vanilla JavaScript
 - HTML5 + CSS
 - WebRTC (`RTCPeerConnection`, `getUserMedia`, `getDisplayMedia`)
+- Canvas `captureStream()` + WebSocket screen-video relay
 - `MediaRecorder`
 - FFmpeg.wasm (`@ffmpeg/ffmpeg`, `@ffmpeg/core`)
 - Web Workers + SharedArrayBuffer via COEP `credentialless`
