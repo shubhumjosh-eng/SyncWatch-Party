@@ -42,16 +42,17 @@ Open `http://localhost:3000`. Open a second tab (or share your LAN URL) with the
 - **Watch anything** — built-in CC0 samples, direct `.mp4`/`.webm` URL input, local file picker, and drag/drop file loading. Host broadcasts `mediaSource` changes to guests.
 - **Telestrator** — normalized `[0..1]` pen and arrow coordinates, color swatches, and 3.5s auto-fade.
 - **Clipping** — consensus or manual clips, a rolling 30-second WebM buffer for live screenshares, and multi-clip reel stitching.
-- **COEP credentialless** — keeps SharedArrayBuffer available for FFmpeg.wasm while allowing external media.
+- **COEP credentialless** — keeps SharedArrayBuffer available for FFmpeg.wasm while allowing external media playback.
+- **Byte-range media** — the server returns `206 Partial Content` with `Accept-Ranges: bytes`, so seeking and clickable `@MM:SS` chat timestamps work.
 
 ## Architecture
 
-- `server/index.js` — Node HTTP server + `ws` WebSocket rooms. Relays playback state, presence, NTP pings, strokes, chat, reactions, clip votes, media-source changes, and targeted WebRTC signaling (`rtc-offer`, `rtc-answer`, `rtc-ice`, `rtc-leave`, `rtc-meta`).
+- `server/index.js` — Node HTTP server + `ws` WebSocket rooms. Relays playback state, presence, NTP pings, strokes, chat, reactions, clip votes, media-source changes, and targeted WebRTC signaling (`rtc-offer`, `rtc-answer`, `rtc-ice`, `rtc-leave`, `rtc-meta`). Server-assigned client IDs, per-room signaling checks, message validation, rate limits, and a 256 KB payload cap keep rooms isolated.
 - `public/js/syncEngine.js` — NTP offset/RTT, target playback time, seek on large error, drift correction.
 - `public/js/telestrator.js` — canvas overlay with normalized coordinates, color selection, and auto-fade.
 - `public/js/clipConsensus.js` — 5-second majority clip trigger.
 - `public/js/rtcCall.js` — `RTCPeerConnection` with `stun:stun.l.google.com:19302`, one connection per peer per stream kind.
-- `public/js/ffmpegWorker.js` — Web Worker. Loads `@ffmpeg/core` ESM from same-origin blob URLs, clips URL/buffer inputs, and stitches clips with the concat demuxer.
+- `public/js/ffmpegWorker.js` — Web Worker. Loads `@ffmpeg/core` ESM from same-origin blob URLs, clips URL/buffer inputs, and stitches clips with the concat demuxer. Jobs are serialized, use per-job filenames, clean up MEMFS in `finally`, and re-encode reels for consistent output.
 - `public/js/app.js` — room controller tying sync, chat, reactions, RTC, media sources, telestrator, and clipping together.
 - `public/samples/` — small CC0 sample videos from MDN's interactive examples.
 
@@ -62,6 +63,15 @@ This app needs a **long-running Node process** for WebSockets. Deploy on Railway
 `railway.json` and `render.yaml` are included. The server reads `process.env.PORT`, so no code changes are needed.
 
 Vercel/Netlify serverless functions are **not** a good fit for the `ws` server.
+
+Set `ALLOWED_ORIGINS` to a comma-separated list of trusted origins if the app is served from a different host than the WebSocket endpoint.
+
+## Tests
+
+```bash
+npm test        # server range requests, room isolation, signaling, validation
+npm run check   # syntax check every JS module
+```
 
 ## Built-in sample attribution
 
@@ -82,5 +92,9 @@ Vercel/Netlify serverless functions are **not** a good fit for the `ws` server.
 - No authentication or accounts — room codes are lightweight demo identifiers.
 - A guest cannot access another user's local file; the host broadcasts only a notice for local files.
 - Screen clips use a rolling ~30s WebM buffer and depend on browser `MediaRecorder` support.
-- WebRTC call quality depends on the network and the public STUN server.
-- The host is a single point of playback authority; if the host leaves, the next peer becomes host.
+- WebRTC call quality depends on the network and the public STUN server; there is no TURN relay, so restrictive NATs may fail. Remote call audio starts muted and must be enabled per tile.
+- The host is a single point of playback authority; if the host leaves, the next peer becomes host and the previous screen share is reset.
+- Clipping a remote URL requires that origin to allow cross-origin `fetch` (CORS); playback alone does not. Local files and live screen shares can only be clipped by the device that owns them.
+- Reel stitching re-encodes with a uniform codec and 30 fps, so it is slower than stream copy and normalizes frame timing.
+- Render free web services sleep after idle, which disconnects WebSocket rooms; use an always-on plan for real use.
+- Older browsers without module Workers, `ResizeObserver`, or `aspect-ratio` are not supported.

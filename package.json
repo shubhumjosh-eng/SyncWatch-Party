@@ -5,7 +5,12 @@
   "description": "Zero-install real-time co-op watch room with client-side highlight clipping",
   "scripts": {
     "start": "node server/index.js",
-    "dev": "node server/index.js"
+    "dev": "node server/index.js",
+    "test": "node --test",
+    "check": "node --check server/index.js && node --check public/js/app.js && node --check public/js/syncEngine.js && node --check public/js/telestrator.js && node --check public/js/clipConsensus.js && node --check public/js/rtcCall.js && node --check public/js/ffmpegWorker.js"
+  },
+  "engines": {
+    "node": ">=18"
   },
   "dependencies": {
     "@ffmpeg/core": "0.12.10",

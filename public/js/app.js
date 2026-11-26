@@ -14,6 +14,9 @@ const roomInput = el('roomInput');
 const initialRoom = new URLSearchParams(location.search).get('room');
 if (initialRoom) roomInput.value = initialRoom.toUpperCase();
 
+const DEFAULT_SAMPLE = document.querySelector('.tab.active')?.dataset.src || '/samples/flower.mp4';
+const DEFAULT_SAMPLE_NAME = document.querySelector('.tab.active')?.textContent.trim() || 'FLOWER';
+
 let ws = null;
 let clientId = sessionStorage.getItem('syncwatch-client') || `u${Math.random().toString(36).slice(2, 8)}`;
 sessionStorage.setItem('syncwatch-client', clientId);
@@ -28,9 +31,14 @@ let sharing = false;
 const jobs = new Map();
 const activeJobs = new Set();
 const clips = [];
+const MAX_CLIPS = 10;
+let reelDuration = 0;
 let screenRecorder = null;
 let screenChunks = [];
 let pendingScreenStream = null;
+let sourceBeforeShare = null;
+let localObjectUrl = null;
+let reconnectTimer = null;
 let currentSource = { kind: 'sample', src: '', name: 'FLOWER' };
 
 const COLORS = ['#56d6c4', '#f0b85a', '#ff7a7a', '#6aa9ff', '#d6a6ff', '#8bd450'];
@@ -96,17 +104,36 @@ const consensus = new ClipConsensus({
 function handleRtcStream({ id, kind, stream }) {
   renderCallTile(id, kind, stream, false);
   if (kind === 'screen' && currentSource.kind === 'screen' && id === currentSource.hostId) {
-    attachScreenStream(stream);
+    attachScreenStream(stream, id);
   } else if (kind === 'screen') {
-    pendingScreenStream = stream;
+    pendingScreenStream = { id, stream };
+  }
+}
+
+function removeCallTiles(peer, kind) {
+  for (const tile of [...el('callTiles').children]) {
+    if (tile.dataset.key === `${peer}:${kind}:remote`) tile.remove();
+  }
+  if (kind === 'screen' && pendingScreenStream && pendingScreenStream.id === peer) {
+    pendingScreenStream = null;
   }
 }
 
 const rtc = new RTCCall({
   send,
   getPeers: () => peerIds.filter((id) => id !== clientId),
+  getLocalId: () => clientId,
   onStream: handleRtcStream,
-  onLog: log
+  onLog: log,
+  onError: (error) => log(`RTC error: ${error.message}`),
+  onPeerLeft: ({ id, kind }) => {
+    removeCallTiles(id, kind);
+    if (kind === 'screen' && currentSource.kind === 'screen' && currentSource.hostId === id) {
+      pendingScreenStream = null;
+      setSample(DEFAULT_SAMPLE, DEFAULT_SAMPLE_NAME, false);
+      setStatus('Screen share ended. Restored the built-in sample.');
+    }
+  }
 });
 
 function renderCallTile(id, kind, stream, local) {
@@ -121,18 +148,36 @@ function renderCallTile(id, kind, stream, local) {
     const media = document.createElement('video');
     media.autoplay = true;
     media.playsInline = true;
-    media.muted = local;
+    // Autoplay with audio is blocked by browsers. Start muted and expose an
+    // explicit per-tile control so the user can opt in to remote audio.
+    media.muted = true;
     const label = document.createElement('span');
     label.textContent = `${local ? 'YOU' : id.slice(0, 6)} ${kind.toUpperCase()}`;
     tile.append(media, label);
+    if (!local) {
+      const audio = document.createElement('button');
+      audio.className = 'btn tiny ghost tile-audio';
+      audio.textContent = 'AUDIO OFF';
+      audio.addEventListener('click', () => {
+        const unmute = media.muted;
+        media.muted = !unmute;
+        rtc.setRemoteAudioMuted(id, kind, !unmute);
+        audio.textContent = unmute ? 'AUDIO ON' : 'AUDIO OFF';
+      });
+      tile.append(audio);
+    }
     container.append(tile);
   }
   const media = tile.querySelector('video');
-  if (media.srcObject !== stream) media.srcObject = stream;
+  if (media.srcObject !== stream) {
+    media.srcObject = stream;
+    media.play().catch(() => {});
+  }
 }
 
-function attachScreenStream(stream) {
+function attachScreenStream(stream, hostId) {
   if (currentSource.kind !== 'screen') return;
+  if (hostId && currentSource.hostId && hostId !== currentSource.hostId) return;
   if (video.srcObject !== stream) {
     video.srcObject = stream;
     video.muted = false;
@@ -159,16 +204,18 @@ ffmpegWorker.onmessage = (event) => {
   }
   if (msg.type === 'error') {
     activeJobs.delete(msg.id);
+    jobs.delete(msg.id);
     log(`Clip failed: ${msg.message}`);
     setStatus(`Clip failed: ${msg.message}`);
     return;
   }
   if (msg.type === 'done') {
     activeJobs.delete(msg.id);
+    jobs.delete(msg.id);
     const blob = new Blob([msg.buffer], { type: 'video/mp4' });
     const url = URL.createObjectURL(blob);
     const meta = msg.meta || jobs.get(msg.id) || {};
-    if (meta.kind === 'reel') addReelCard(url, msg.id, blob);
+    if (meta.kind === 'reel') addReelCard(url, msg.id, blob, meta);
     else addClipCard(url, msg.id, meta.start || 0, meta.end || 0, blob);
     log(`Clip ${msg.id} ready (${(blob.size / 1024 / 1024).toFixed(1)} MB)`);
     setStatus('Clip ready. Download it from the Clip Reel.');
@@ -181,12 +228,25 @@ ffmpegWorker.onerror = (event) => {
   setStatus('FFmpeg worker failed. Try reloading the page.');
 };
 
+function revokeCardUrls(container) {
+  while (container.children.length > MAX_CLIPS) {
+    const removed = container.lastChild;
+    const href = removed.querySelector('a')?.href;
+    if (href) URL.revokeObjectURL(href);
+    removed.remove();
+  }
+}
+
 function addClipCard(url, job, start, end, blob) {
   const reel = el('clips');
   const empty = reel.querySelector('.empty');
   if (empty) empty.remove();
 
   clips.push({ blob, url, start, end, job });
+  while (clips.length > MAX_CLIPS) {
+    const removed = clips.shift();
+    URL.revokeObjectURL(removed.url);
+  }
 
   const card = document.createElement('div');
   card.className = 'clip-card';
@@ -208,24 +268,26 @@ function addClipCard(url, job, start, end, blob) {
 
   card.append(row, seekBtn);
   reel.prepend(card);
-  while (reel.children.length > 10) reel.lastChild.remove();
+  revokeCardUrls(reel);
 }
 
-function addReelCard(url, job, blob) {
+function addReelCard(url, job, blob, meta = {}) {
   const reel = el('clips');
   const card = document.createElement('div');
   card.className = 'clip-card';
   const row = document.createElement('div');
   row.className = 'clip-row';
-  const meta = document.createElement('small');
-  meta.textContent = `FULL REEL [${formatTime(0)} -> ${formatTime(blob.size / 40000)}]`;
+  const label = document.createElement('small');
+  const duration = Number(meta.end) || 0;
+  label.textContent = `FULL REEL [${formatTime(0)} -> ${formatTime(duration || blob.size / 40000)}]`;
   const link = document.createElement('a');
   link.href = url;
   link.download = `syncwatch-reel-${job}.mp4`;
   link.textContent = 'DOWNLOAD REEL';
-  row.append(meta, link);
+  row.append(label, link);
   card.append(row);
   reel.prepend(card);
+  revokeCardUrls(reel);
 }
 
 function buildScreenBuffer(seconds) {
@@ -249,6 +311,16 @@ function clipAt(time) {
   const requested = Number(el('clipDuration').value) || 8;
   const start = Math.max(0, time - 4);
   const end = start + requested;
+
+  if (currentSource.kind === 'screen' && !sharing) {
+    setStatus('Only the sharing device can clip the live screen.');
+    return;
+  }
+  if (currentSource.kind === 'local' && !isHost) {
+    setStatus('The host is playing a local file. Only the host can clip it.');
+    return;
+  }
+
   const job = ++ffmpegJob;
   jobs.set(job, { start, end });
   activeJobs.add(job);
@@ -285,6 +357,7 @@ function clipAt(time) {
     id: job,
     cmd: 'clip',
     src: new URL(src, location.href).href,
+    ext: currentSource.kind === 'local' ? currentSource.ext : undefined,
     start,
     duration: requested,
     meta: { start, end }
@@ -339,7 +412,9 @@ function addReaction(emoji, time, from, local) {
   marker.className = 'reaction-marker';
   marker.textContent = emoji;
   marker.style.left = duration ? `${Math.min(99, (time / duration) * 100)}%` : '2%';
-  el('reactionStrip').append(marker);
+  const strip = el('reactionStrip');
+  strip.append(marker);
+  while (strip.children.length > 60) strip.firstChild.remove();
 
   const float = document.createElement('div');
   float.className = 'floating-reaction';
@@ -380,11 +455,12 @@ function setRole(host) {
 }
 
 function setSample(src, name, broadcast = true) {
-  stopScreenShare(false);
+  stopScreenShare(false, false);
   video.srcObject = null;
   video.muted = false;
   video.src = src;
   video.load();
+  sync.resetPlayback();
   currentSource = { kind: 'sample', src, name };
   document.querySelectorAll('.tab').forEach((tab) => {
     tab.classList.toggle('active', tab.dataset.src === src);
@@ -400,10 +476,16 @@ function loadUrl(rawUrl, broadcast = true) {
     setStatus('Enter a direct http(s) .mp4 or .webm URL.');
     return;
   }
+  stopScreenShare(false, false);
+  if (localObjectUrl) {
+    URL.revokeObjectURL(localObjectUrl);
+    localObjectUrl = null;
+  }
   video.srcObject = null;
   video.muted = false;
   video.src = url;
   video.load();
+  sync.resetPlayback();
   currentSource = { kind: 'url', src: url, name: url.split('/').pop() || 'remote video' };
   document.querySelectorAll('.tab').forEach((tab) => tab.classList.remove('active'));
   setStatus(`Loading ${currentSource.name}`);
@@ -418,12 +500,22 @@ function loadFile(file, broadcast = true) {
     setStatus('Choose an .mp4 or .webm file.');
     return;
   }
+  stopScreenShare(false, false);
+  if (localObjectUrl) URL.revokeObjectURL(localObjectUrl);
   video.srcObject = null;
   video.muted = false;
   const url = URL.createObjectURL(file);
+  localObjectUrl = url;
   video.src = url;
   video.load();
-  currentSource = { kind: 'local', src: url, name: file.name, size: file.size };
+  sync.resetPlayback();
+  currentSource = {
+    kind: 'local',
+    src: url,
+    name: file.name,
+    size: file.size,
+    ext: file.name.includes('.') ? file.name.split('.').pop().toLowerCase() : 'mp4'
+  };
   document.querySelectorAll('.tab').forEach((tab) => tab.classList.remove('active'));
   setStatus(`Loaded local file ${file.name}. Only you can access this file; peers see a notice.`);
   log(`Loaded local file ${file.name} (${(file.size / 1024 / 1024).toFixed(1)} MB)`);
@@ -442,14 +534,23 @@ function handleMediaSource(msg) {
     loadUrl(source.url, false);
     setStatus('Host switched to a direct video URL.');
   } else if (source.kind === 'local') {
+    pendingScreenStream = null;
+    video.pause();
+    video.srcObject = null;
+    video.removeAttribute('src');
+    video.load();
+    sync.resetPlayback();
     currentSource = { kind: 'local', src: '', name: source.name };
     setStatus(`Host is playing a local file: ${source.name}. Peers cannot access local files.`);
   } else if (source.kind === 'screen') {
+    const pending = pendingScreenStream;
+    pendingScreenStream = null;
     currentSource = { kind: 'screen', hostId: msg.from };
     video.pause();
     video.srcObject = null;
+    sync.resetPlayback();
     setStatus('Host is sharing their screen. Waiting for the live stream...');
-    if (pendingScreenStream) attachScreenStream(pendingScreenStream);
+    if (pending && pending.id === msg.from) attachScreenStream(pending.stream, msg.from);
   }
 }
 
@@ -468,6 +569,8 @@ async function startScreenShare() {
       audio: true
     });
     sharing = true;
+    sourceBeforeShare = { ...currentSource };
+    pendingScreenStream = null;
     el('shareBtn').textContent = 'STOP SHARE';
     currentSource = { kind: 'screen', hostId: clientId };
 
@@ -488,7 +591,7 @@ async function startScreenShare() {
           event.data.arrayBuffer().then((buffer) => {
             screenChunks.push({ t: Date.now(), data: new Uint8Array(buffer) });
             const cutoff = Date.now() - 30000;
-            screenChunks = screenChunks.filter((chunk) => chunk.t >= cutoff);
+            screenChunks = screenChunks.filter((chunk) => chunk.t >= cutoff).slice(-200);
           });
         }
       };
@@ -512,27 +615,38 @@ async function startScreenShare() {
   }
 }
 
-function stopScreenShare(fromBrowser = false) {
+function stopScreenShare(fromBrowser = false, restore = true) {
   if (!sharing) return;
   sharing = false;
   el('shareBtn').textContent = 'SHARE SCREEN';
   if (screenRecorder && screenRecorder.state !== 'inactive') screenRecorder.stop();
   screenRecorder = null;
   screenChunks = [];
+  pendingScreenStream = null;
   rtc.stopScreenShare();
   video.srcObject = null;
   video.muted = false;
-  const tab = document.querySelector('.tab.active');
-  setSample(tab.dataset.src, tab.textContent.trim(), true);
+
+  if (restore) {
+    const previous = sourceBeforeShare;
+    sourceBeforeShare = null;
+    if (previous && previous.kind === 'sample') setSample(previous.src, previous.name, isHost);
+    else if (previous && previous.kind === 'url') loadUrl(previous.src, isHost);
+    else setSample(DEFAULT_SAMPLE, DEFAULT_SAMPLE_NAME, isHost);
+  }
   if (fromBrowser) log('Screen share stopped from browser controls');
   setStatus('Screen share stopped. Normal playback restored.');
 }
 
 function connect() {
+  if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) return;
+  clearTimeout(reconnectTimer);
   const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${protocol}://${location.host}`);
+  const socket = new WebSocket(`${protocol}://${location.host}`);
+  ws = socket;
 
-  ws.onopen = () => {
+  socket.onopen = () => {
+    if (ws !== socket) return;
     el('netState').textContent = 'ONLINE';
     el('netState').className = 'on';
     setStatus('Connected. Syncing clock with the room server...');
@@ -540,15 +654,17 @@ function connect() {
     sync.start();
   };
 
-  ws.onclose = () => {
+  socket.onclose = () => {
+    if (ws !== socket) return;
     el('netState').textContent = 'OFFLINE';
     el('netState').className = 'off';
     setStatus('Disconnected. Reconnecting...');
     sync.stop();
-    setTimeout(connect, 1500);
+    reconnectTimer = setTimeout(connect, 1500);
   };
 
-  ws.onmessage = (event) => {
+  socket.onmessage = (event) => {
+    if (ws !== socket) return;
     let msg;
     try {
       msg = JSON.parse(event.data);
@@ -564,6 +680,9 @@ function connect() {
       sync.version = -1;
       setRole(msg.hostId === clientId);
       sync.handleState(msg.state);
+      if (msg.mediaSource && msg.hostId !== clientId) {
+        handleMediaSource({ from: msg.hostId, source: msg.mediaSource });
+      }
       setStatus(`Joined room ${roomCode}. Press PLAY to start the room.`);
       log(`Joined ${roomCode} as ${clientId}`);
       return;
@@ -571,6 +690,10 @@ function connect() {
 
     if (msg.type === 'hostChanged') {
       setRole(msg.hostId === clientId);
+      if (msg.hostId === clientId && currentSource.kind === 'screen' && !sharing) {
+        setSample(DEFAULT_SAMPLE, DEFAULT_SAMPLE_NAME, true);
+        setStatus('You are now the host. The previous screen share has ended.');
+      }
       log(msg.hostId === clientId ? 'You are now the host' : 'Host changed');
       return;
     }
@@ -612,6 +735,16 @@ function connect() {
 
     if (msg.type === 'mediaSource') {
       handleMediaSource(msg);
+      return;
+    }
+
+    if (msg.type === 'rtc-peer-left') {
+      removeCallTiles(msg.from, msg.kind);
+      if (msg.kind === 'screen' && currentSource.kind === 'screen' && currentSource.hostId === msg.from) {
+        pendingScreenStream = null;
+        setSample(DEFAULT_SAMPLE, DEFAULT_SAMPLE_NAME, false);
+        setStatus('The sharer disconnected. Screen share ended.');
+      }
       return;
     }
 
@@ -665,6 +798,9 @@ video.addEventListener('pause', () => {
 
 seek.addEventListener('pointerdown', () => { isSeeking = true; });
 seek.addEventListener('pointerup', () => { isSeeking = false; });
+seek.addEventListener('pointercancel', () => { isSeeking = false; });
+seek.addEventListener('keydown', () => { isSeeking = true; });
+seek.addEventListener('keyup', () => { isSeeking = false; });
 seek.addEventListener('input', () => {
   if (!video.duration || video.srcObject) return;
   video.currentTime = (Number(seek.value) / 1000) * video.duration;
@@ -783,10 +919,14 @@ el('stitchBtn').addEventListener('click', async () => {
   }
   const job = ++ffmpegJob;
   const buffers = [];
+  reelDuration = clips.reduce((sum, clip) => sum + Math.max(0, clip.end - clip.start), 0);
   for (const clip of clips) buffers.push(await clip.blob.arrayBuffer());
   activeJobs.add(job);
   setStatus('Stitching the highlight reel...');
-  ffmpegWorker.postMessage({ id: job, cmd: 'stitch', buffers, meta: { kind: 'reel' } }, buffers);
+  ffmpegWorker.postMessage(
+    { id: job, cmd: 'stitch', buffers, meta: { kind: 'reel', end: reelDuration } },
+    buffers
+  );
 });
 
 el('joinCallBtn').addEventListener('click', async () => {
@@ -794,6 +934,10 @@ el('joinCallBtn').addEventListener('click', async () => {
     rtc.leave();
     callJoined = false;
     el('callTiles').innerHTML = '';
+    pendingScreenStream = null;
+    if (currentSource.kind === 'screen' && !sharing) {
+      setSample(DEFAULT_SAMPLE, DEFAULT_SAMPLE_NAME, false);
+    }
     el('joinCallBtn').textContent = 'JOIN CALL';
     el('muteBtn').disabled = true;
     el('camBtn').disabled = true;
@@ -825,7 +969,17 @@ el('camBtn').addEventListener('click', () => {
 
 new ResizeObserver(() => teles.resize()).observe(screen);
 
-currentSource.src = document.querySelector('.tab.active').dataset.src;
+window.addEventListener('beforeunload', () => {
+  sync.stop();
+  rtc.leave();
+  for (const clip of clips) URL.revokeObjectURL(clip.url);
+  if (localObjectUrl) URL.revokeObjectURL(localObjectUrl);
+  for (const link of el('clips').querySelectorAll('a[href^="blob:"]')) {
+    URL.revokeObjectURL(link.href);
+  }
+});
+
+currentSource.src = DEFAULT_SAMPLE;
 video.src = currentSource.src;
 teles.resize();
 connect();

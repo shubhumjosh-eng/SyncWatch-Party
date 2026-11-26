@@ -79,6 +79,16 @@ export class SyncEngine {
     if (this.isHost) this.broadcastState();
   }
 
+  // Call whenever the media source changes so a stale host timeline cannot be
+  // applied to a video that is still loading a different file.
+  resetPlayback() {
+    this.version = -1;
+    this.drift = 0;
+    this.lastSeekAt = 0;
+    const video = this.getVideo();
+    if (video) video.playbackRate = 1;
+  }
+
   handleState(state) {
     if (this.isHost || !state) return;
     if (typeof state.version === 'number') {
@@ -90,20 +100,27 @@ export class SyncEngine {
     if (!video) return;
 
     const elapsed = state.playing ? Math.max(0, this.serverNow() - state.updatedAt) / 1000 : 0;
-    const target = Math.max(0, state.currentTime + elapsed);
-    const error = target - video.currentTime;
+    const base = Number.isFinite(state.currentTime) ? state.currentTime : 0;
+    let target = Math.max(0, base + elapsed);
+    if (Number.isFinite(video.duration) && video.duration > 0) {
+      target = Math.min(target, Math.max(0, video.duration - 0.05));
+    }
+
+    const ready = video.readyState >= 1;
+    const current = ready ? video.currentTime : target;
+    const error = target - current;
     this.drift = error;
     this.emit();
 
-    if (Math.abs(error) > 0.4 && Date.now() - this.lastSeekAt > 900) {
+    if (ready && Math.abs(error) > 0.4 && Date.now() - this.lastSeekAt > 900) {
       video.currentTime = target;
       this.lastSeekAt = Date.now();
     }
 
-    const rate = state.playing ? clamp(1 + error * 0.08, 0.9, 1.1) : 1;
-    if (Math.abs(video.playbackRate - rate) > 0.008) video.playbackRate = rate;
+    const rate = ready && state.playing ? clamp(1 + error * 0.08, 0.9, 1.1) : 1;
+    if (ready && Math.abs(video.playbackRate - rate) > 0.008) video.playbackRate = rate;
 
-    if (state.playing && video.paused) video.play().catch(() => {});
+    if (ready && state.playing && video.paused) video.play().catch(() => {});
     if (!state.playing && !video.paused) video.pause();
   }
 

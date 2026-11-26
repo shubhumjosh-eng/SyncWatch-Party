@@ -3,8 +3,11 @@ services:
     name: syncwatch-party
     env: node
     plan: free
-    buildCommand: npm install
+    buildCommand: npm ci
     startCommand: npm start
+    healthCheckPath: /
+    # Free web services spin down after idle, which kills WebSocket rooms.
+    # Use an always-on paid plan for production use.
     envVars:
       - key: NODE_ENV
         value: production

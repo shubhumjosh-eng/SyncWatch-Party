@@ -92,3 +92,17 @@ Date: 2026-11-26. Severity: **P0** breaks a core flow, **P1** security/robustnes
 4. Screen-share lifecycle: stop on all source changes, guard `stopScreenShare()`, tag/clear pending streams, reset source on host migration.
 5. WebRTC perfect negotiation, uncaught promise handling, tile cleanup.
 6. Memory/array caps and deployment config (`engines`, healthcheck, always-on plan).
+
+## Fix status — 2026-11-26
+
+All findings above were addressed in a follow-up pass:
+
+- **Range requests** are implemented in `serveFile()`; live QA confirmed `seekable = [0, 5.055]` and `@00:02` now seeks to 2.00 s.
+- **Server hardening**: server-generated IDs, `leaveRoom()` with host migration and presence broadcasts, per-room RTC target checks, sanitized room codes/messages/strokes/SDP/ICE, `maxPayload`, rate limits, Origin allowlist, and `mediaSource` replay for late joiners. Seven `node:test` cases cover these paths.
+- **FFmpeg worker**: serialized job queue, per-job MEMFS names, correct event attribution, `finally` cleanup, load-retry reset, CORS-aware remote fetch with clear errors, safer re-encoded concat, and strict message validation. Live QA completed three simultaneous clips (jobs 4/5/6) and a 16 s reel with no errors.
+- **Screen share**: stopped on every source change, guarded restore of the previous source, tagged pending streams, reset on host change/peer disconnect/leave call.
+- **WebRTC**: perfect negotiation, validated signaling, bounded ICE queue, no unhandled rejections, full track cleanup, peer-left tile cleanup, and muted-by-default remote video with explicit AUDIO control.
+- **Sync**: guest target time clamped to duration and gated on metadata readiness; playback rate reset when the source changes.
+- **Memory/config**: object URLs revoked, clip/reaction/job arrays capped, seek slider keyboard/pointercancel handling, `engines.node >=18`, healthcheck paths, `npm ci` on Render.
+
+Residual limitations are documented in `README.md` → Known limitations (CORS-dependent URL clipping, no TURN, Render free-plan sleep, older-browser support, re-encode speed).
