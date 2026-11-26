@@ -186,9 +186,16 @@ function attachScreenStream(stream, hostId) {
   setStatus('Watching the host screen share live.');
 }
 
-const ffmpegWorker = new Worker('/js/ffmpegWorker.js', { type: 'module' });
+const ffmpegWorker = (() => {
+  try {
+    return new Worker('/js/ffmpegWorker.js', { type: 'module' });
+  } catch (error) {
+    log(`Clipping unavailable in this browser: ${error.message}`);
+    return null;
+  }
+})();
 
-ffmpegWorker.onmessage = (event) => {
+if (ffmpegWorker) ffmpegWorker.onmessage = (event) => {
   const msg = event.data || {};
   if (msg.type === 'stage') {
     setStatus(`${msg.stage}...`);
@@ -223,7 +230,7 @@ ffmpegWorker.onmessage = (event) => {
   }
 };
 
-ffmpegWorker.onerror = (event) => {
+if (ffmpegWorker) ffmpegWorker.onerror = (event) => {
   log(`FFmpeg worker error: ${event.message}`);
   setStatus('FFmpeg worker failed. Try reloading the page.');
 };
@@ -308,6 +315,10 @@ function buildScreenBuffer(seconds) {
 }
 
 function clipAt(time) {
+  if (!ffmpegWorker) {
+    setStatus('Clipping is not supported in this browser.');
+    return;
+  }
   const requested = Number(el('clipDuration').value) || 8;
   const start = Math.max(0, time - 4);
   const end = start + requested;
@@ -913,6 +924,10 @@ el('clipBtn').addEventListener('click', () => {
 el('clipNowBtn').addEventListener('click', () => clipAt(video.currentTime || 0));
 
 el('stitchBtn').addEventListener('click', async () => {
+  if (!ffmpegWorker) {
+    setStatus('Clipping is not supported in this browser.');
+    return;
+  }
   if (clips.length < 2) {
     setStatus('Add at least two clips to the reel before stitching.');
     return;
@@ -967,7 +982,8 @@ el('camBtn').addEventListener('click', () => {
   el('camBtn').textContent = off ? 'CAM ON' : 'CAM TOGGLE';
 });
 
-new ResizeObserver(() => teles.resize()).observe(screen);
+if ('ResizeObserver' in window) new ResizeObserver(() => teles.resize()).observe(screen);
+else window.addEventListener('resize', () => teles.resize());
 
 window.addEventListener('beforeunload', () => {
   sync.stop();
