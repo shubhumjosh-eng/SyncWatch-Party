@@ -108,6 +108,59 @@ test('late joiners receive the current media source', async () => {
   assert.equal(lateJoined.mediaSource.url, 'https://example.com/clip.mp4');
 });
 
+test('screen frames relay only from the host while sharing', async () => {
+  const room = `RELAY${Date.now()}`.slice(0, 8);
+  const host = await connect();
+  const hostJoined = await join(host, room, 'host');
+  const hostId = hostJoined.clientId;
+  const guest = await connect();
+  const guestJoined = await join(guest, room, 'guest');
+
+  host.send(JSON.stringify({
+    type: 'mediaSource',
+    source: { kind: 'screen', hostId }
+  }));
+  const frame = onceMessage(guest, (msg) => msg.type === 'screen-frame');
+  host.send(JSON.stringify({
+    type: 'screen-frame',
+    data: 'data:image/jpeg;base64,QUJD',
+    w: 640,
+    h: 360,
+    seq: 3
+  }));
+  const received = await frame;
+  assert.equal(received.from, hostId);
+  assert.equal(received.seq, 3);
+  assert.equal(received.data, 'data:image/jpeg;base64,QUJD');
+
+  let guestFrames = 0;
+  let invalidFrames = 0;
+  const listener = (raw) => {
+    const msg = JSON.parse(raw.toString());
+    if (msg.type === 'screen-frame') guestFrames += 1;
+  };
+  guest.on('message', listener);
+  guest.send(JSON.stringify({
+    type: 'screen-frame',
+    data: 'data:image/jpeg;base64,QUJD',
+    w: 640,
+    h: 360,
+    seq: 4
+  }));
+  host.send(JSON.stringify({
+    type: 'screen-frame',
+    data: 'data:text/html;base64,PHNjcmlwdD4=',
+    w: 640,
+    h: 360,
+    seq: 5
+  }));
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  guest.off('message', listener);
+  assert.equal(guestFrames, 0);
+  assert.equal(invalidFrames, 0);
+  assert.notEqual(guestJoined.clientId, hostId);
+});
+
 test('host migration broadcasts the new host', async () => {
   const room = `MIGRATE${Date.now()}`.slice(0, 8);
   const host = await connect();
@@ -189,4 +242,42 @@ test('cross-origin upgrades are rejected', () => {
     wss.shouldHandle({ headers: { origin: 'https://good.example', host: 'good.example' } }),
     true
   );
+});
+
+function urlsOf(config) {
+  return config.iceServers.flatMap((entry) =>
+    (Array.isArray(entry.urls) ? entry.urls : [entry.urls]).map(String)
+  );
+}
+
+test('RTC config exposes STUN only by default', async () => {
+  const response = await fetch(`http://127.0.0.1:${port}/rtc-config.json`);
+  assert.equal(response.status, 200);
+  const urls = urlsOf(await response.json());
+  assert.ok(urls.some((url) => url.startsWith('stun:')));
+  assert.ok(!urls.some((url) => url.startsWith('turn:')));
+});
+
+test('RTC config honors TURN environment overrides', async () => {
+  const keys = ['TURN_URL', 'TURN_USERNAME', 'TURN_CREDENTIAL'];
+  const saved = new Map(keys.map((key) => [key, process.env[key]]));
+  process.env.TURN_URL = 'turn:relay.example.com:3478,turns:relay.example.com:5349';
+  process.env.TURN_USERNAME = 'room-user';
+  process.env.TURN_CREDENTIAL = 'room-pass';
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/rtc-config.json`);
+    const config = await response.json();
+    const urls = urlsOf(config);
+    assert.ok(urls.includes('turn:relay.example.com:3478'));
+    assert.ok(urls.includes('turns:relay.example.com:5349'));
+    assert.ok(!urls.some((url) => url.includes('openrelay')));
+    const turn = config.iceServers.find((entry) => urlsOf({ iceServers: [entry] }).some((u) => u.startsWith('turn:')));
+    assert.equal(turn.username, 'room-user');
+    assert.equal(turn.credential, 'room-pass');
+  } finally {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
 });

@@ -38,7 +38,7 @@ Open `http://localhost:3000`. Open a second tab (or share your LAN URL) with the
 - **Room chat** — WebSocket broadcast with user color badges and clickable `@MM:SS` timestamps that seek the player.
 - **Reactions** — floating emoji over the video and markers on a timeline reaction strip.
 - **WebRTC call** — camera/mic stream (`kind: 'cam'`) with Join Call, Mic Mute, Cam Toggle, and compact live peer tiles.
-- **Screen share** — host `getDisplayMedia` stream (`kind: 'screen'`), muted locally to prevent echo, with browser-bar stop handling.
+- **Screen share** — host `getDisplayMedia` stream (`kind: 'screen'`), muted locally to prevent echo, relayed over the room WebSocket so it works across different networks, with browser-bar stop handling and automatic delivery to late joiners.
 - **Watch anything** — built-in CC0 samples, direct `.mp4`/`.webm` URL input, local file picker, and drag/drop file loading. Host broadcasts `mediaSource` changes to guests.
 - **Telestrator** — normalized `[0..1]` pen and arrow coordinates, color swatches, and 3.5s auto-fade.
 - **Clipping** — consensus or manual clips, a rolling 30-second WebM buffer for live screenshares, and multi-clip reel stitching.
@@ -66,6 +66,14 @@ Vercel/Netlify serverless functions are **not** a good fit for the `ws` server.
 
 Set `ALLOWED_ORIGINS` to a comma-separated list of trusted origins if the app is served from a different host than the WebSocket endpoint.
 
+### WebRTC / TURN
+
+- **Screen sharing is relayed over the room WebSocket**, not WebRTC, so it works between laptops on different networks without any TURN server. The host sends compressed JPEG frames (~8 fps, capped at 960×540 and 220 KB per frame) and guests render them into a canvas-backed video tile.
+- Camera calls still use WebRTC. The server exposes `/rtc-config.json`, which the client loads before creating peer connections.
+- If you want TURN fallback for camera calls, set `TURN_URL` (comma-separated `turn:`/`turns:` URLs), `TURN_USERNAME`, and `TURN_CREDENTIAL` in your host's environment. No credentials are stored in the repo.
+- Leave `TURN_URL` unset for STUN-only camera calls; set it to an empty string to explicitly disable TURN.
+- The browser logs ICE and connection state transitions in the room log, so a failed camera connection is visible immediately.
+
 ## Tests
 
 ```bash
@@ -92,7 +100,8 @@ npm run check   # syntax check every JS module
 - No authentication or accounts — room codes are lightweight demo identifiers.
 - A guest cannot access another user's local file; the host broadcasts only a notice for local files.
 - Screen clips use a rolling ~30s WebM buffer and depend on browser `MediaRecorder` support.
-- WebRTC call quality depends on the network and the public STUN server; there is no TURN relay, so restrictive NATs may fail. Remote call audio starts muted and must be enabled per tile.
+- Screen relay quality depends on the room server's bandwidth and uses ~8 fps JPEG frames rather than a native 30 fps desktop stream. It still carries audio through the separate WebRTC call, not through the relay.
+- Camera-call quality still depends on the network; configure your own `TURN_*` credentials if STUN alone fails. Remote call audio starts muted and must be enabled per tile.
 - The host is a single point of playback authority; if the host leaves, the next peer becomes host and the previous screen share is reset.
 - Clipping a remote URL requires that origin to allow cross-origin `fetch` (CORS); playback alone does not. Local files and live screen shares can only be clipped by the device that owns them.
 - Reel stitching re-encodes with a uniform codec and 30 fps, so it is slower than stream copy and normalizes frame timing.

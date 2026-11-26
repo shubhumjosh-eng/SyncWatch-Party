@@ -12,7 +12,7 @@ const MAX_TOKEN_LENGTH = 256;
 const MAX_PENDING_ICE = 64;
 
 export class RTCCall {
-  constructor({ send, getPeers, onStream, onLog, onError, onPeerLeft, localId, getLocalId } = {}) {
+  constructor({ send, getPeers, onStream, onLog, onError, onPeerLeft, onState, localId, getLocalId } = {}) {
     this.send = typeof send === 'function' ? send : () => {};
     this.getPeers = typeof getPeers === 'function' ? getPeers : () => [];
     this.onStream = typeof onStream === 'function' ? onStream : null;
@@ -22,6 +22,10 @@ export class RTCCall {
     // properties at any time too (e.g. rtc.onPeerLeft = fn).
     this.onError = typeof onError === 'function' ? onError : null;
     this.onPeerLeft = typeof onPeerLeft === 'function' ? onPeerLeft : null;
+    this.onState = typeof onState === 'function' ? onState : null;
+
+    // STUN only until app.js loads /rtc-config.json, which may add TURN.
+    this.iceServers = ICE_SERVERS.map((entry) => ({ ...entry, urls: [...entry.urls] }));
     this.getLocalId = typeof getLocalId === 'function'
       ? getLocalId
       : (localId != null ? () => localId : null);
@@ -39,6 +43,41 @@ export class RTCCall {
 
   key(peer, kind) {
     return `${peer}:${kind}`;
+  }
+
+  // Replace the STUN-only default with the server-provided STUN/TURN list.
+  setIceServers(servers) {
+    if (!Array.isArray(servers) || !servers.length) return false;
+    const clean = [];
+    for (const entry of servers) {
+      if (!entry || typeof entry !== 'object') continue;
+      const raw = Array.isArray(entry.urls) ? entry.urls : [entry.urls];
+      const urls = raw
+        .filter((value) => typeof value === 'string' && /^(stun|turn|turns):/i.test(value))
+        .slice(0, 8);
+      if (!urls.length) continue;
+      const out = { urls };
+      if (typeof entry.username === 'string' && entry.username.length <= 256) {
+        out.username = entry.username;
+      }
+      if (typeof entry.credential === 'string' && entry.credential.length <= 512) {
+        out.credential = entry.credential;
+      }
+      clean.push(out);
+    }
+    if (!clean.length) return false;
+    this.iceServers = clean;
+    this.log(`ICE servers: ${clean.map((entry) => entry.urls.join('+')).join(', ')}`);
+    return true;
+  }
+
+  emitState(peer, kind, state, iceState) {
+    if (typeof this.onState !== 'function') return;
+    try {
+      this.onState({ id: peer, kind, state, iceState });
+    } catch (err) {
+      this.error('onState', err);
+    }
   }
 
   log(text) {
@@ -203,7 +242,7 @@ export class RTCCall {
 
     let pc;
     try {
-      pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+      pc = new RTCPeerConnection({ iceServers: this.iceServers });
     } catch (err) {
       this.error('createConnection', err);
       return null;
@@ -263,8 +302,16 @@ export class RTCCall {
       }
     };
 
+    pc.oniceconnectionstatechange = () => {
+      const iceState = pc.iceConnectionState;
+      this.log(`ICE ${safePeer} (${safeKind}): ${iceState}`);
+      this.emitState(safePeer, safeKind, pc.connectionState, iceState);
+    };
+
     pc.onconnectionstatechange = () => {
       const state = pc.connectionState;
+      this.log(`RTC ${safePeer} (${safeKind}): ${state}`);
+      this.emitState(safePeer, safeKind, state, pc.iceConnectionState);
       if (state === 'failed') {
         this.log(`RTC connection to ${safePeer} (${safeKind}) failed`);
         this.emitPeerLeft(safePeer, safeKind, 'failed');
@@ -566,6 +613,20 @@ export class RTCCall {
         this.error('stopTracks', err);
       }
     }
+  }
+
+  // A guest who joins after sharing started has no screen connection yet.
+  // Offer only to those peers so current viewers are not renegotiated.
+  offerScreenToNewPeers(peers) {
+    if (!this.localScreen) return Promise.resolve();
+    const targets = this.peerList()
+      .filter((peer) => !peers || peers.includes(peer))
+      .filter((peer) => !this.connections.has(this.key(peer, 'screen')));
+    if (!targets.length) return Promise.resolve();
+    return this.run(async () => {
+      for (const peer of targets) await this.offer(peer, 'screen');
+      this.log(`Shared screen with late joiner(s): ${targets.join(', ')}`);
+    }, 'offerScreenToNewPeers');
   }
 
   async startScreenShare(stream) {

@@ -41,6 +41,20 @@ let localObjectUrl = null;
 let reconnectTimer = null;
 let currentSource = { kind: 'sample', src: '', name: 'FLOWER' };
 
+// Screen sharing is relayed over the room WebSocket (not WebRTC) so it works
+// between laptops on different networks without needing a TURN server.
+let screenTxTimer = null;
+let screenTxCanvas = null;
+let screenTxCtx = null;
+let screenTxStream = null;
+let screenTxSeq = 0;
+let screenRxCanvas = null;
+let screenRxCtx = null;
+let screenRxStream = null;
+let screenRxHost = null;
+let screenRxSeq = 0;
+let screenRxDraw = 0;
+
 const COLORS = ['#56d6c4', '#f0b85a', '#ff7a7a', '#6aa9ff', '#d6a6ff', '#8bd450'];
 
 function colorFor(id) {
@@ -130,11 +144,28 @@ const rtc = new RTCCall({
     removeCallTiles(id, kind);
     if (kind === 'screen' && currentSource.kind === 'screen' && currentSource.hostId === id) {
       pendingScreenStream = null;
+      stopScreenReceiver();
       setSample(DEFAULT_SAMPLE, DEFAULT_SAMPLE_NAME, false);
       setStatus('Screen share ended. Restored the built-in sample.');
     }
+  },
+  onState: ({ id, kind, state, iceState }) => {
+    if (kind !== 'screen' || currentSource.kind !== 'screen' || id !== currentSource.hostId) return;
+    if (state === 'connected') setStatus('Watching the host screen share live.');
+    else if (state === 'connecting' || iceState === 'checking') {
+      setStatus('Connecting to the host’s screen...');
+    } else if (state === 'failed' || iceState === 'failed' || state === 'disconnected') {
+      setStatus('Screen connection failed. Try rejoining the room or call.');
+    }
   }
 });
+
+fetch('/rtc-config.json')
+  .then((response) => (response.ok ? response.json() : null))
+  .then((config) => {
+    if (config && Array.isArray(config.iceServers)) rtc.setIceServers(config.iceServers);
+  })
+  .catch((error) => log(`RTC config unavailable: ${error.message}`));
 
 function renderCallTile(id, kind, stream, local) {
   const key = `${id}:${kind}:${local ? 'local' : 'remote'}`;
@@ -455,6 +486,8 @@ function updatePresence(msg) {
     row.append(name, role);
     container.append(row);
   }
+
+  if (sharing && isHost) rtc.offerScreenToNewPeers(peerIds);
 }
 
 function setRole(host) {
@@ -538,6 +571,9 @@ function loadFile(file, broadcast = true) {
 function handleMediaSource(msg) {
   if (msg.from === clientId) return;
   const source = msg.source || {};
+  if (source.kind !== 'screen' || (currentSource.kind === 'screen' && currentSource.hostId !== msg.from)) {
+    stopScreenReceiver();
+  }
   if (source.kind === 'sample') {
     setSample(source.src, source.name || 'SAMPLE', false);
     setStatus('Host switched to a built-in sample.');
@@ -563,6 +599,111 @@ function handleMediaSource(msg) {
     setStatus('Host is sharing their screen. Waiting for the live stream...');
     if (pending && pending.id === msg.from) attachScreenStream(pending.stream, msg.from);
   }
+}
+
+function stopScreenTransmitter() {
+  if (screenTxTimer) clearInterval(screenTxTimer);
+  screenTxTimer = null;
+  if (screenTxStream) screenTxStream.getTracks().forEach((track) => track.stop());
+  screenTxStream = null;
+  screenTxCanvas = null;
+  screenTxCtx = null;
+  screenTxSeq = 0;
+  const tile = el('callTiles').querySelector(`[data-key="${clientId}:screen:local"]`);
+  if (tile) tile.remove();
+}
+
+function startScreenTransmitter(stream) {
+  stopScreenTransmitter();
+  if (!HTMLCanvasElement.prototype.captureStream) {
+    log('Screen relay unavailable: canvas capture is not supported');
+    return;
+  }
+  screenTxCanvas = document.createElement('canvas');
+  screenTxCtx = screenTxCanvas.getContext('2d', { alpha: false });
+  const track = stream.getVideoTracks()[0];
+  const settings = track && typeof track.getSettings === 'function' ? track.getSettings() : {};
+  const sourceW = settings.width || video.videoWidth || 960;
+  const sourceH = settings.height || video.videoHeight || 540;
+  const ratio = Math.min(1, 960 / sourceW, 540 / sourceH);
+  screenTxCanvas.width = Math.max(16, Math.round(sourceW * ratio));
+  screenTxCanvas.height = Math.max(16, Math.round(sourceH * ratio));
+  screenTxStream = screenTxCanvas.captureStream(12);
+  renderCallTile(clientId, 'screen', screenTxStream, true);
+
+  // One JPEG frame every 120ms keeps signaling well under the server's rate
+  // limit while staying smooth enough for a shared screen.
+  screenTxTimer = setInterval(() => {
+    if (!sharing || !screenTxCtx || !video.videoWidth || ws.readyState !== 1) return;
+    screenTxCtx.drawImage(video, 0, 0, screenTxCanvas.width, screenTxCanvas.height);
+    let data = screenTxCanvas.toDataURL('image/jpeg', 0.55);
+    if (data.length > 220_000) data = screenTxCanvas.toDataURL('image/jpeg', 0.35);
+    if (data.length > 220_000) return;
+    screenTxSeq += 1;
+    send({
+      type: 'screen-frame',
+      data,
+      seq: screenTxSeq,
+      w: screenTxCanvas.width,
+      h: screenTxCanvas.height
+    });
+  }, 120);
+  log('Screen relay started over the room connection');
+}
+
+function stopScreenReceiver() {
+  if (screenRxStream) screenRxStream.getTracks().forEach((track) => track.stop());
+  screenRxStream = null;
+  screenRxCanvas = null;
+  screenRxCtx = null;
+  screenRxHost = null;
+  screenRxSeq = 0;
+  screenRxDraw += 1;
+  for (const tile of [...el('callTiles').children]) {
+    if (tile.dataset.key.endsWith(':screen:remote')) tile.remove();
+  }
+}
+
+function handleScreenFrame(msg) {
+  if (currentSource.kind !== 'screen') return;
+  if (currentSource.hostId && msg.from !== currentSource.hostId) return;
+  if (typeof msg.data !== 'string' || !msg.data.startsWith('data:image/')) return;
+  const seq = Number(msg.seq) || 0;
+  if (seq <= screenRxSeq) return;
+  screenRxSeq = seq;
+
+  if (!screenRxCanvas || screenRxHost !== msg.from) {
+    stopScreenReceiver();
+    if (!HTMLCanvasElement.prototype.captureStream) {
+      setStatus('This browser cannot display the relayed screen share.');
+      return;
+    }
+    screenRxCanvas = document.createElement('canvas');
+    screenRxCtx = screenRxCanvas.getContext('2d', { alpha: false });
+    screenRxCanvas.width = Math.max(16, Number(msg.w) || 960);
+    screenRxCanvas.height = Math.max(16, Number(msg.h) || 540);
+    screenRxStream = screenRxCanvas.captureStream(12);
+    screenRxHost = msg.from;
+    renderCallTile(msg.from, 'screen', screenRxStream, false);
+    attachScreenStream(screenRxStream, msg.from);
+    log(`Receiving ${msg.from.slice(0, 6)}'s screen over the room connection`);
+  }
+
+  if (screenRxCanvas.width !== msg.w || screenRxCanvas.height !== msg.h) {
+    screenRxCanvas.width = Math.max(16, Number(msg.w) || 960);
+    screenRxCanvas.height = Math.max(16, Number(msg.h) || 540);
+  }
+
+  screenRxDraw += 1;
+  const drawId = screenRxDraw;
+  const img = new Image();
+  img.onload = () => {
+    if (drawId === screenRxDraw && screenRxCtx) {
+      screenRxCtx.drawImage(img, 0, 0, screenRxCanvas.width, screenRxCanvas.height);
+      setStatus('Watching the host screen share live.');
+    }
+  };
+  img.src = msg.data;
 }
 
 async function startScreenShare() {
@@ -612,7 +753,7 @@ async function startScreenShare() {
       log(`MediaRecorder unavailable: ${error.message}`);
     }
 
-    await rtc.startScreenShare(stream);
+    startScreenTransmitter(stream);
     send({ type: 'mediaSource', source: { kind: 'screen', hostId: clientId } });
     setStatus('Sharing your screen. Audio is muted locally to prevent echo.');
 
@@ -634,6 +775,7 @@ function stopScreenShare(fromBrowser = false, restore = true) {
   screenRecorder = null;
   screenChunks = [];
   pendingScreenStream = null;
+  stopScreenTransmitter();
   rtc.stopScreenShare();
   video.srcObject = null;
   video.muted = false;
@@ -694,6 +836,9 @@ function connect() {
       if (msg.mediaSource && msg.hostId !== clientId) {
         handleMediaSource({ from: msg.hostId, source: msg.mediaSource });
       }
+      if (sharing && isHost) {
+        send({ type: 'mediaSource', source: { kind: 'screen', hostId: clientId } });
+      }
       setStatus(`Joined room ${roomCode}. Press PLAY to start the room.`);
       log(`Joined ${roomCode} as ${clientId}`);
       return;
@@ -702,6 +847,7 @@ function connect() {
     if (msg.type === 'hostChanged') {
       setRole(msg.hostId === clientId);
       if (msg.hostId === clientId && currentSource.kind === 'screen' && !sharing) {
+        stopScreenReceiver();
         setSample(DEFAULT_SAMPLE, DEFAULT_SAMPLE_NAME, true);
         setStatus('You are now the host. The previous screen share has ended.');
       }
@@ -749,10 +895,16 @@ function connect() {
       return;
     }
 
+    if (msg.type === 'screen-frame') {
+      handleScreenFrame(msg);
+      return;
+    }
+
     if (msg.type === 'rtc-peer-left') {
       removeCallTiles(msg.from, msg.kind);
       if (msg.kind === 'screen' && currentSource.kind === 'screen' && currentSource.hostId === msg.from) {
         pendingScreenStream = null;
+        stopScreenReceiver();
         setSample(DEFAULT_SAMPLE, DEFAULT_SAMPLE_NAME, false);
         setStatus('The sharer disconnected. Screen share ended.');
       }
@@ -781,7 +933,12 @@ function connect() {
 }
 
 el('joinBtn').addEventListener('click', () => {
-  roomCode = roomInput.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8) || 'DEMO';
+  const nextRoom = roomInput.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8) || 'DEMO';
+  if (nextRoom !== roomCode) {
+    if (sharing) stopScreenShare(false, false);
+    stopScreenReceiver();
+  }
+  roomCode = nextRoom;
   roomInput.value = roomCode;
   history.replaceState(null, '', `?room=${roomCode}`);
   if (ws && ws.readyState === 1) send({ type: 'join', room: roomCode, clientId });

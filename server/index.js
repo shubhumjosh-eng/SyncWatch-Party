@@ -63,6 +63,8 @@ const ALLOWED_EMOJI = new Set(['🔥', '🎯', '⚡', '😂']);
 const ALLOWED_TOOLS = new Set(['pen', 'arrow']);
 const HEX_COLOR = /^#[0-9a-f]{3,8}$/i;
 
+// Screen sharing is relayed over the room WebSocket. TURN is opt-in for
+// camera calls via TURN_URL / TURN_USERNAME / TURN_CREDENTIAL.
 function cleanRoomCode(value) {
   return String(value || '')
     .toUpperCase()
@@ -85,6 +87,28 @@ function cleanText(value, max = 500) {
     .replace(/[\u0000-\u001f\u007f]/g, ' ')
     .trim()
     .slice(0, max);
+}
+
+function buildIceServers() {
+  const servers = [{ urls: ['stun:stun.l.google.com:19302'] }];
+  const configured = cleanText(process.env.TURN_URL, 500);
+
+  if (!configured) return servers;
+
+  const urls = configured
+    .split(',')
+    .map((value) => value.trim())
+    .filter((value) => /^(turn|turns):/i.test(value))
+    .slice(0, 8);
+  if (!urls.length) return servers;
+
+  const entry = { urls };
+  const username = cleanText(process.env.TURN_USERNAME, 200);
+  const credential = cleanText(process.env.TURN_CREDENTIAL, 300);
+  if (username) entry.username = username;
+  if (credential) entry.credential = credential;
+  servers.push(entry);
+  return servers;
 }
 
 function headersFor(filePath, size) {
@@ -168,6 +192,18 @@ const server = http.createServer((req, res) => {
   } catch {
     res.writeHead(400, { 'Content-Type': 'text/plain', ...SECURITY_HEADERS });
     res.end('Bad request');
+    return;
+  }
+
+  if (pathname === '/rtc-config.json') {
+    const body = JSON.stringify({ iceServers: buildIceServers() });
+    res.writeHead(200, {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Content-Length': Buffer.byteLength(body),
+      'Cache-Control': 'no-cache',
+      ...SECURITY_HEADERS
+    });
+    res.end(body);
     return;
   }
 
@@ -486,6 +522,27 @@ wss.on('connection', (ws, req) => {
       return;
     }
 
+    // Screen video is relayed through the room WebSocket instead of WebRTC so
+    // it works across any network without a TURN relay. Frames are small JPEGs
+    // and the server enforces both size and rate limits.
+    if (msg.type === 'screen-frame') {
+      if (clientId !== room.host || room.mediaSource.kind !== 'screen') return;
+      if (typeof msg.data !== 'string' || msg.data.length > 220_000) return;
+      if (!/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(msg.data)) return;
+      const width = finiteNumber(msg.w, 0, 16, 1920);
+      const height = finiteNumber(msg.h, 0, 16, 1080);
+      if (!width || !height) return;
+      broadcast(room, {
+        type: 'screen-frame',
+        from: clientId,
+        data: msg.data,
+        w: width,
+        h: height,
+        seq: finiteNumber(msg.seq, 0, 0, Number.MAX_SAFE_INTEGER)
+      }, ws);
+      return;
+    }
+
     if (msg.type.startsWith('rtc-')) {
       const kind = msg.kind === 'screen' ? 'screen' : 'cam';
       const payload = {
@@ -578,6 +635,7 @@ module.exports = {
   getRoom,
   rooms,
   cleanRoomCode,
+  buildIceServers,
   sanitizeSource,
   sanitizeStroke,
   DEFAULT_MEDIA_SOURCE
