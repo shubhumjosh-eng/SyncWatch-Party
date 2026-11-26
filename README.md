@@ -1,6 +1,6 @@
 # SyncWatch Party
 
-A screening room in your browser. Friends join with a link or room code, watch in sync, chat with timestamped messages, take a voice/video call, share a screen or tab, draw together, react on a timeline, and cut highlight clips that are encoded entirely in the browser with FFmpeg.wasm.
+Everyone in the same frame. Friends join with a link or room code, watch in sync, chat with timestamped messages, take a voice/video call, share a screen or tab, draw together, react on a timeline, and cut highlight clips that are encoded entirely in the browser with FFmpeg.wasm.
 
 Built for the **CSC Winter Sparkathon** — technology that helps people share an experience.
 
@@ -78,7 +78,7 @@ Set `ALLOWED_ORIGINS` to a comma-separated list of trusted origins if the app is
 ## Tests
 
 ```bash
-npm test        # 23 tests: ranges, rooms, relay, signaling, client helpers, validation
+npm test        # 24 tests: ranges, rooms, relay, signaling, client helpers, validation
 npm run check   # syntax check every JS module
 ```
 

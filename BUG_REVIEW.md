@@ -133,3 +133,14 @@ A fresh judge-focused pass fixed the remaining user-visible and robustness findi
 
 Validation: `npm run check` clean, `npm test` 23/23, and two/three-tab Playwright QA confirmed single reactions, guest play blocked, failed-share rollback, live relay + late joiner, peer-disconnect cleanup, room-switch call cleanup, empty-room reset, invite link, mobile overflow, and zero console errors.
 
+## Third QA pass — 2026-11-26
+
+Judge-visible critique found one real defect and four visual issues:
+
+- **P0 FFmpeg worker failure on fresh load** — the module worker was created eagerly, and browsers that block it fired `onerror` with an empty `event.message`, producing `FFmpeg worker error: undefined` and the alarming status `FFmpeg worker failed. Try reloading the page.` The worker is now created lazily on first clip/stitch attempt; a load failure is silent, never says “undefined,” clears any pending jobs, and only explains itself if the user actually tries to clip. Tested via `workerErrorText()` / `clippingUnavailableMessage()` with empty error objects.
+- **Brand lockup** — the placeholder “SW” monogram was replaced with an inline projector-and-light-beam SVG mark.
+- **Dead right column** — the Activity log section now grows with the row so it fills the side panel instead of leaving empty space beneath it.
+- **Reaction strip** — faint timeline ticks and a “No reactions yet” hint make it read as a timeline before the first reaction.
+- **Tagline** — changed to “Everyone in the same frame,” which describes the feeling of shared viewing rather than the category.
+- Assets cache-busted to `app.js?v=6` / `styles.css?v=6`.
+

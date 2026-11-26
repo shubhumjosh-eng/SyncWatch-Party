@@ -16,7 +16,7 @@ SyncWatch Party
 
 ## Tagline / subtitle
 
-A screening room in your browser.
+Everyone in the same frame.
 
 ## Short description
 

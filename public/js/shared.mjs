@@ -41,3 +41,14 @@ export function splitChatStamps(text) {
 export function seekFraction(value) {
   return clamp(finite(value, 0) / 1000, 0, 1);
 }
+
+// Worker error events often carry no message at all. Never surface "undefined"
+// to the user; describe the real failure in plain language instead.
+export function workerErrorText(error) {
+  const raw = error && typeof error.message === 'string' ? error.message : '';
+  return raw.trim() || 'the clipping worker could not start in this browser';
+}
+
+export function clippingUnavailableMessage(detail) {
+  return `Clipping is unavailable here (${workerErrorText(detail)}). Try an up-to-date browser.`;
+}

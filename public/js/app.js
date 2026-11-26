@@ -2,7 +2,13 @@ import { SyncEngine } from './syncEngine.js';
 import { Telestrator } from './telestrator.js';
 import { ClipConsensus } from './clipConsensus.js';
 import { RTCCall } from './rtcCall.js';
-import { clipRange, splitChatStamps, seekFraction } from './shared.mjs';
+import {
+  clipRange,
+  splitChatStamps,
+  seekFraction,
+  workerErrorText,
+  clippingUnavailableMessage
+} from './shared.mjs';
 
 const el = (id) => document.getElementById(id);
 
@@ -227,16 +233,12 @@ function attachScreenStream(stream, hostId) {
   setStatus('Watching the host screen share live.');
 }
 
-const ffmpegWorker = (() => {
-  try {
-    return new Worker('/js/ffmpegWorker.js', { type: 'module' });
-  } catch (error) {
-    log(`Clipping unavailable in this browser: ${error.message}`);
-    return null;
-  }
-})();
+// The encoder is started on first use. A browser that blocks module workers
+// must not produce a scary error on page load; it only disables clipping.
+let ffmpegWorker = null;
+let ffmpegWorkerError = null;
 
-if (ffmpegWorker) ffmpegWorker.onmessage = (event) => {
+function handleFfmpegMessage(event) {
   const msg = event.data || {};
   if (msg.type === 'stage') {
     setStatus(`${msg.stage}...`);
@@ -269,12 +271,35 @@ if (ffmpegWorker) ffmpegWorker.onmessage = (event) => {
     setStatus('Clip ready. Download it from the reel.');
     send({ type: 'clipReady', job: msg.id });
   }
-};
+}
 
-if (ffmpegWorker) ffmpegWorker.onerror = (event) => {
-  log(`FFmpeg worker error: ${event.message}`);
-  setStatus('FFmpeg worker failed. Try reloading the page.');
-};
+function handleFfmpegWorkerError(event) {
+  if (event && typeof event.preventDefault === 'function') event.preventDefault();
+  const hadActiveJob = activeJobs.size > 0;
+  ffmpegWorkerError = workerErrorText(event);
+  ffmpegWorker = null;
+  activeJobs.clear();
+  jobs.clear();
+  // Silent on a fresh load. Only explain the failure if the user tried to clip.
+  if (hadActiveJob) {
+    setStatus(`Clipping stopped: ${ffmpegWorkerError}. The rest of the room still works.`);
+  }
+}
+
+function getFfmpegWorker() {
+  if (ffmpegWorkerError) return null;
+  if (ffmpegWorker) return ffmpegWorker;
+  try {
+    const worker = new Worker('/js/ffmpegWorker.js', { type: 'module' });
+    worker.onmessage = handleFfmpegMessage;
+    worker.onerror = handleFfmpegWorkerError;
+    ffmpegWorker = worker;
+    return worker;
+  } catch (error) {
+    ffmpegWorkerError = workerErrorText(error);
+    return null;
+  }
+}
 
 // Read the real encoded duration from the blob instead of guessing from its
 // byte size. Falls back to 0 when the browser cannot decode it.
@@ -408,8 +433,9 @@ function buildScreenBuffer(seconds) {
 }
 
 function clipAt(time) {
-  if (!ffmpegWorker) {
-    setStatus('Clipping is not supported in this browser.');
+  const worker = getFfmpegWorker();
+  if (!worker) {
+    setStatus(clippingUnavailableMessage(ffmpegWorkerError));
     return;
   }
   const requested = Number(el('clipDuration').value) || 8;
@@ -438,7 +464,7 @@ function clipAt(time) {
       setStatus('Screen buffer is empty. Wait a moment and try again.');
       return;
     }
-    ffmpegWorker.postMessage({
+    worker.postMessage({
       id: job,
       cmd: 'clip',
       buffer: buffered.buffer,
@@ -456,7 +482,7 @@ function clipAt(time) {
     setStatus('Load a video first.');
     return;
   }
-  ffmpegWorker.postMessage({
+  worker.postMessage({
     id: job,
     cmd: 'clip',
     src: new URL(src, location.href).href,
@@ -1270,8 +1296,9 @@ el('clipBtn').addEventListener('click', () => {
 el('clipNowBtn').addEventListener('click', () => clipAt(video.currentTime || 0));
 
 el('stitchBtn').addEventListener('click', async () => {
-  if (!ffmpegWorker) {
-    setStatus('Clipping is not supported in this browser.');
+  const worker = getFfmpegWorker();
+  if (!worker) {
+    setStatus(clippingUnavailableMessage(ffmpegWorkerError));
     return;
   }
   if (clips.length < 2) {
@@ -1287,7 +1314,7 @@ el('stitchBtn').addEventListener('click', async () => {
   for (const clip of clips) buffers.push(await clip.blob.arrayBuffer());
   activeJobs.add(job);
   setStatus('Stitching the highlight reel...');
-  ffmpegWorker.postMessage(
+  worker.postMessage(
     { id: job, cmd: 'stitch', buffers, meta: { kind: 'reel', end: reelDuration } },
     buffers
   );

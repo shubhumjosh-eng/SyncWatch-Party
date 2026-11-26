@@ -1,6 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { clipRange, splitChatStamps, seekFraction } from '../public/js/shared.mjs';
+import {
+  clipRange,
+  splitChatStamps,
+  seekFraction,
+  workerErrorText,
+  clippingUnavailableMessage
+} from '../public/js/shared.mjs';
 
 test('clip ranges never run past the end of a short video', () => {
   assert.deepEqual(clipRange(20, 8, 100), { start: 16, end: 24 });
@@ -25,4 +31,15 @@ test('seek values are clamped to a usable fraction', () => {
   assert.equal(seekFraction(-20), 0);
   assert.equal(seekFraction(1400), 1);
   assert.equal(seekFraction('nope'), 0);
+});
+
+test('worker errors never expose an undefined message', () => {
+  assert.equal(workerErrorText({}), 'the clipping worker could not start in this browser');
+  assert.equal(workerErrorText(null), 'the clipping worker could not start in this browser');
+  assert.equal(workerErrorText(new Error('module import failed')), 'module import failed');
+  assert.match(
+    clippingUnavailableMessage({}),
+    /^Clipping is unavailable here \(the clipping worker could not start in this browser\)\./
+  );
+  assert.doesNotMatch(clippingUnavailableMessage({}), /undefined/);
 });
