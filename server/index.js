@@ -11,6 +11,7 @@ const PUBLIC_DIR = path.join(ROOT, 'public');
 const MAX_PAYLOAD = 256 * 1024;
 const RATE_WINDOW_MS = 10_000;
 const RATE_LIMIT = 200;
+const MAX_ROOMS = 64;
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -123,62 +124,84 @@ function headersFor(filePath, size) {
   };
 }
 
-function badRange(res, size) {
-  res.writeHead(416, {
+function badRange(res, size, head = false) {
+  const headers = {
     'Content-Type': 'text/plain',
+    'Accept-Ranges': 'bytes',
     'Content-Range': `bytes */${size}`,
     ...SECURITY_HEADERS
-  });
-  res.end('Invalid range');
+  };
+  if (head) headers['Content-Length'] = Buffer.byteLength('Invalid range');
+  res.writeHead(416, headers);
+  res.end(head ? undefined : 'Invalid range');
 }
 
 function serveFile(filePath, req, res) {
+  const head = req.method === 'HEAD';
   fs.stat(filePath, (err, stat) => {
     if (err || !stat.isFile()) {
       res.writeHead(404, { 'Content-Type': 'text/plain', ...SECURITY_HEADERS });
-      res.end('Not found');
+      res.end();
       return;
     }
 
     const range = req.headers.range;
     if (!range) {
       res.writeHead(200, headersFor(filePath, stat.size));
+      // HEAD must not open a read stream: it can never carry a body.
+      if (head) {
+        res.end();
+        return;
+      }
       fs.createReadStream(filePath).pipe(res);
       return;
     }
 
     const match = /^bytes=(\d*)-(\d*)$/.exec(String(range).trim());
     if (!match || (!match[1] && !match[2])) {
-      badRange(res, stat.size);
+      badRange(res, stat.size, head);
       return;
     }
 
     let start;
     let end;
     if (!match[1]) {
-      const suffix = Number(match[2]);
-      if (!Number.isFinite(suffix) || suffix <= 0) {
-        badRange(res, stat.size);
+      const parsed = Number(match[2]);
+      if (!Number.isFinite(parsed)) {
+        badRange(res, stat.size, head);
         return;
       }
+      // `bytes=-0` is treated as "last byte" instead of failing outright.
+      const suffix = Math.max(1, Math.floor(parsed));
       start = Math.max(0, stat.size - suffix);
       end = stat.size - 1;
     } else {
       start = Number(match[1]);
       end = match[2] ? Number(match[2]) : stat.size - 1;
+      if (!Number.isFinite(start)) {
+        badRange(res, stat.size, head);
+        return;
+      }
       if (!Number.isFinite(end)) end = stat.size - 1;
     }
 
-    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || start > end || start >= stat.size) {
-      badRange(res, stat.size);
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || start >= stat.size) {
+      badRange(res, stat.size, head);
       return;
     }
 
+    // A reversed end is clamped to the start rather than reported as 416.
+    if (end < start) end = start;
     end = Math.min(end, stat.size - 1);
+
     res.writeHead(206, {
       ...headersFor(filePath, end - start + 1),
       'Content-Range': `bytes ${start}-${end}/${stat.size}`
     });
+    if (head) {
+      res.end();
+      return;
+    }
     fs.createReadStream(filePath, { start, end })
       .on('error', () => res.destroy())
       .pipe(res);
@@ -233,18 +256,46 @@ const server = http.createServer((req, res) => {
 
 const rooms = new Map();
 
+function freshRoomState(updatedAt = Date.now(), version = 0) {
+  return { playing: false, currentTime: 0, updatedAt, version };
+}
+
 function getRoom(code) {
   const roomCode = cleanRoomCode(code);
-  if (!rooms.has(roomCode)) {
-    rooms.set(roomCode, {
-      clients: new Map(),
-      host: null,
-      state: { playing: false, currentTime: 0, updatedAt: Date.now(), version: 0 },
-      mediaSource: { ...DEFAULT_MEDIA_SOURCE },
-      votes: []
-    });
+  const existing = rooms.get(roomCode);
+  if (existing) return existing;
+
+  if (rooms.size >= MAX_ROOMS) {
+    const oldest = [...rooms.values()].sort((a, b) => a.state.updatedAt - b.state.updatedAt)[0];
+    if (oldest) {
+      for (const socket of oldest.clients.values()) {
+        try {
+          socket.close(4004, 'Room limit reached');
+        } catch {
+          // A closing socket is already handled by its close event.
+        }
+      }
+      rooms.delete(oldest.code);
+    }
   }
-  return rooms.get(roomCode);
+
+  const room = {
+    code: roomCode,
+    clients: new Map(),
+    streams: new Map(),
+    host: null,
+    state: freshRoomState(),
+    mediaSource: { ...DEFAULT_MEDIA_SOURCE },
+    votes: []
+  };
+  rooms.set(roomCode, room);
+  return room;
+}
+
+function markStreamKind(activeRoom, id, kind) {
+  const clean = kind === 'screen' ? 'screen' : 'cam';
+  if (!activeRoom.streams.has(id)) activeRoom.streams.set(id, new Set());
+  activeRoom.streams.get(id).add(clean);
 }
 
 function send(ws, obj) {
@@ -396,21 +447,27 @@ wss.on('connection', (ws, req) => {
     const previous = room;
     room = null;
     previous.clients.delete(clientId);
-    broadcast(previous, { type: 'rtc-peer-left', from: clientId });
+
+    const kinds = previous.streams.get(clientId);
+    previous.streams.delete(clientId);
+    for (const kind of (kinds && kinds.size ? kinds : ['cam'])) {
+      broadcast(previous, { type: 'rtc-peer-left', from: clientId, kind }, ws);
+    }
+
+    // An empty room has no state worth preserving. Delete it immediately so a
+    // later joiner cannot inherit a departed user's media source or host flag.
+    if (previous.clients.size === 0) {
+      rooms.delete(previous.code);
+      return;
+    }
 
     if (previous.host === clientId) {
       const nextHost = previous.clients.keys().next().value || null;
       previous.host = nextHost;
       if (nextHost) {
-        if (previous.mediaSource.kind === 'screen') {
-          previous.mediaSource = { ...DEFAULT_MEDIA_SOURCE };
-        }
-        previous.state = {
-          playing: false,
-          currentTime: previous.state.currentTime,
-          updatedAt: Date.now(),
-          version: previous.state.version + 1
-        };
+        previous.mediaSource = { ...DEFAULT_MEDIA_SOURCE };
+        previous.votes = [];
+        previous.state = freshRoomState(Date.now(), previous.state.version + 1);
         broadcast(previous, { type: 'hostChanged', hostId: nextHost });
         broadcast(previous, { type: 'state', ...previous.state });
         broadcast(previous, { type: 'mediaSource', from: nextHost, source: previous.mediaSource });
@@ -435,6 +492,7 @@ wss.on('connection', (ws, req) => {
       const code = cleanRoomCode(msg.room);
       room = getRoom(code);
       room.clients.set(clientId, ws);
+      if (!room.streams.has(clientId)) room.streams.set(clientId, new Set());
       if (!room.host) room.host = clientId;
 
       send(ws, {
@@ -490,10 +548,12 @@ wss.on('connection', (ws, req) => {
     }
 
     if (msg.type === 'chat') {
+      const text = cleanText(msg.text, 500);
+      if (!text) return;
       broadcast(room, {
         type: 'chat',
         from: clientId,
-        text: cleanText(msg.text, 500),
+        text,
         videoTime: finiteNumber(msg.videoTime, 0, 0, 86_400),
         ts: Date.now()
       });
@@ -503,13 +563,14 @@ wss.on('connection', (ws, req) => {
     if (msg.type === 'reaction') {
       const emoji = ALLOWED_EMOJI.has(msg.emoji) ? msg.emoji : null;
       if (!emoji) return;
+      // The sender renders the reaction locally; echoing it would draw it twice.
       broadcast(room, {
         type: 'reaction',
         from: clientId,
         emoji,
         videoTime: finiteNumber(msg.videoTime, 0, 0, 86_400),
         ts: Date.now()
-      });
+      }, ws);
       return;
     }
 
@@ -518,6 +579,7 @@ wss.on('connection', (ws, req) => {
       const source = sanitizeSource(msg.source, clientId);
       if (!source) return;
       room.mediaSource = source;
+      if (source.kind === 'screen') markStreamKind(room, clientId, 'screen');
       broadcast(room, { type: 'mediaSource', from: clientId, source }, ws);
       return;
     }
@@ -545,6 +607,7 @@ wss.on('connection', (ws, req) => {
 
     if (msg.type.startsWith('rtc-')) {
       const kind = msg.kind === 'screen' ? 'screen' : 'cam';
+      markStreamKind(room, clientId, kind);
       const payload = {
         type: msg.type,
         from: clientId,
@@ -581,7 +644,7 @@ wss.on('connection', (ws, req) => {
         room.votes.push({ id: clientId, at: now });
       }
       const unique = new Set(room.votes.map((vote) => vote.id)).size;
-      const threshold = Math.max(2, Math.ceil(room.clients.size * 0.6));
+      const threshold = Math.max(1, Math.ceil(room.clients.size * 0.6));
       if (unique >= threshold) {
         broadcast(room, {
           type: 'clipConsensus',
@@ -635,6 +698,7 @@ module.exports = {
   getRoom,
   rooms,
   cleanRoomCode,
+  MAX_ROOMS,
   buildIceServers,
   sanitizeSource,
   sanitizeStroke,

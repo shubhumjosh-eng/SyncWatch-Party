@@ -116,3 +116,20 @@ Two-tab QA confirmed that signaling worked on different networks but WebRTC medi
 - Camera calls keep WebRTC perfect negotiation and can optionally use TURN via `TURN_URL` / `TURN_USERNAME` / `TURN_CREDENTIAL`; ICE state transitions are logged.
 - Server validates frame host, MIME type, size, dimensions, and sequence; rate limits still apply.
 
+## Second QA pass — 2026-11-26
+
+A fresh judge-focused pass fixed the remaining user-visible and robustness findings:
+
+- **P0 reactions** — the server now excludes the sender from `reaction` broadcasts, so one click draws exactly one marker/float per viewer.
+- **P0 empty rooms** — a room is deleted as soon as its last socket leaves; the next joiner starts as host with the default sample. Host migration resets every inherited media-source kind, not just `screen`.
+- **P0 peer departure** — `rtc-peer-left` now carries `kind`, and closing sockets announce each active stream (`cam`/`screen`) so remote tiles and screen receivers are removed.
+- **P0 share rollback** — screen sharing flips room state only after local preview, recorder, relay transmitter, and track setup succeed. Any failure stops tracks/recorder/relay and restores the previous source.
+- **P0 host-only controls** — guests get a clear status message instead of a play/pause that gets snapped back; the seek slider is disabled for guests.
+- **P1 server limits** — rooms are capped at 64, one socket can no longer create unbounded rooms, empty rooms are deleted immediately, `HEAD` returns headers without a stream, `416` advertises `Accept-Ranges`, and reversed/zero-suffix ranges clamp instead of failing.
+- **P1 consensus/chat/jobs** — a solo viewer can trigger a clip, blank chat text is dropped, and the FFmpeg worker keeps job metadata before deleting the job.
+- **P1 call/stream cleanup** — switching rooms leaves the call, stops camera tracks, clears tiles, and clears pending screen streams. Pending streams are keyed by peer, and recorder chunks are ordered by sequence before being encoded.
+- **P2 polish** — clip ranges are clamped to the real video duration, reel duration uses probed/clip metadata instead of file size, `isSeeking` resets on every change/blur, reel cards and `clips[]` are pruned together, remote strokes fade on the receiver clock, and chat stamps accept long timestamps.
+- **Identity/UI** — warm cinema redesign (velvet brown + projector amber, serif headings, sentence-case controls), invite-link button, and cache-busted `app.js?v=5` / `styles.css?v=5`.
+
+Validation: `npm run check` clean, `npm test` 23/23, and two/three-tab Playwright QA confirmed single reactions, guest play blocked, failed-share rollback, live relay + late joiner, peer-disconnect cleanup, room-switch call cleanup, empty-room reset, invite link, mobile overflow, and zero console errors.
+

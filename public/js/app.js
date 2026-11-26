@@ -2,6 +2,7 @@ import { SyncEngine } from './syncEngine.js';
 import { Telestrator } from './telestrator.js';
 import { ClipConsensus } from './clipConsensus.js';
 import { RTCCall } from './rtcCall.js';
+import { clipRange, splitChatStamps, seekFraction } from './shared.mjs';
 
 const el = (id) => document.getElementById(id);
 
@@ -35,11 +36,14 @@ const MAX_CLIPS = 10;
 let reelDuration = 0;
 let screenRecorder = null;
 let screenChunks = [];
-let pendingScreenStream = null;
+let screenChunkSeq = 0;
+// Multiple peers can offer a screen at once; keep each pending stream by peer
+// so a late mediaSource cannot attach the wrong one.
+const pendingScreenStreams = new Map();
 let sourceBeforeShare = null;
 let localObjectUrl = null;
 let reconnectTimer = null;
-let currentSource = { kind: 'sample', src: '', name: 'FLOWER' };
+let currentSource = { kind: 'sample', src: '', name: 'Flower' };
 
 // Screen sharing is relayed over the room WebSocket (not WebRTC) so it works
 // between laptops on different networks without needing a TURN server.
@@ -128,7 +132,7 @@ function handleRtcStream({ id, kind, stream }) {
   if (kind === 'screen' && currentSource.kind === 'screen' && id === currentSource.hostId) {
     attachScreenStream(stream, id);
   } else if (kind === 'screen') {
-    pendingScreenStream = { id, stream };
+    pendingScreenStreams.set(id, stream);
   }
 }
 
@@ -136,9 +140,7 @@ function removeCallTiles(peer, kind) {
   for (const tile of [...el('callTiles').children]) {
     if (tile.dataset.key === `${peer}:${kind}:remote`) tile.remove();
   }
-  if (kind === 'screen' && pendingScreenStream && pendingScreenStream.id === peer) {
-    pendingScreenStream = null;
-  }
+  if (kind === 'screen') pendingScreenStreams.delete(peer);
 }
 
 const rtc = new RTCCall({
@@ -151,7 +153,7 @@ const rtc = new RTCCall({
   onPeerLeft: ({ id, kind }) => {
     removeCallTiles(id, kind);
     if (kind === 'screen' && currentSource.kind === 'screen' && currentSource.hostId === id) {
-      pendingScreenStream = null;
+      pendingScreenStreams.delete(id);
       stopScreenReceiver();
       setSample(DEFAULT_SAMPLE, DEFAULT_SAMPLE_NAME, false);
       setStatus('Screen share ended. Restored the built-in sample.');
@@ -191,17 +193,17 @@ function renderCallTile(id, kind, stream, local) {
     // explicit per-tile control so the user can opt in to remote audio.
     media.muted = true;
     const label = document.createElement('span');
-    label.textContent = `${local ? 'YOU' : id.slice(0, 6)} ${kind.toUpperCase()}`;
+    label.textContent = `${local ? 'You' : id.slice(0, 6)} · ${kind === 'screen' ? 'screen' : 'camera'}`;
     tile.append(media, label);
     if (!local) {
       const audio = document.createElement('button');
       audio.className = 'btn tiny ghost tile-audio';
-      audio.textContent = 'AUDIO OFF';
+      audio.textContent = 'Audio off';
       audio.addEventListener('click', () => {
         const unmute = media.muted;
         media.muted = !unmute;
         rtc.setRemoteAudioMuted(id, kind, !unmute);
-        audio.textContent = unmute ? 'AUDIO ON' : 'AUDIO OFF';
+        audio.textContent = unmute ? 'Audio on' : 'Audio off';
       });
       tile.append(audio);
     }
@@ -256,15 +258,15 @@ if (ffmpegWorker) ffmpegWorker.onmessage = (event) => {
     return;
   }
   if (msg.type === 'done') {
+    const meta = jobs.get(msg.id) || {};
     activeJobs.delete(msg.id);
     jobs.delete(msg.id);
     const blob = new Blob([msg.buffer], { type: 'video/mp4' });
     const url = URL.createObjectURL(blob);
-    const meta = msg.meta || jobs.get(msg.id) || {};
     if (meta.kind === 'reel') addReelCard(url, msg.id, blob, meta);
-    else addClipCard(url, msg.id, meta.start || 0, meta.end || 0, blob);
+    else addClipCard(url, msg.id, meta.start || 0, meta.end || 0, blob, Number(meta.duration) || 0);
     log(`Clip ${msg.id} ready (${(blob.size / 1024 / 1024).toFixed(1)} MB)`);
-    setStatus('Clip ready. Download it from the Clip Reel.');
+    setStatus('Clip ready. Download it from the reel.');
     send({ type: 'clipReady', job: msg.id });
   }
 };
@@ -274,24 +276,71 @@ if (ffmpegWorker) ffmpegWorker.onerror = (event) => {
   setStatus('FFmpeg worker failed. Try reloading the page.');
 };
 
-function revokeCardUrls(container) {
+// Read the real encoded duration from the blob instead of guessing from its
+// byte size. Falls back to 0 when the browser cannot decode it.
+function probeDuration(blob) {
+  return new Promise((resolve) => {
+    if (!blob || !blob.size) {
+      resolve(0);
+      return;
+    }
+    const probe = document.createElement('video');
+    const source = URL.createObjectURL(blob);
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      URL.revokeObjectURL(source);
+      resolve(Number.isFinite(value) && value > 0 ? value : 0);
+    };
+    const timer = setTimeout(() => finish(0), 4000);
+    probe.preload = 'metadata';
+    probe.muted = true;
+    probe.onloadedmetadata = () => finish(probe.duration);
+    probe.onerror = () => finish(0);
+    probe.src = source;
+  });
+}
+
+// Keep the DOM and the clips[] source of truth in sync. Evicting a card also
+// removes its clip and revokes its URL, so no card can outlive its blob.
+function pruneClipsUi() {
+  const container = el('clips');
   while (container.children.length > MAX_CLIPS) {
     const removed = container.lastChild;
     const href = removed.querySelector('a')?.href;
+    const index = clips.findIndex((clip) => clip.url === href);
+    if (index !== -1) clips.splice(index, 1);
     if (href) URL.revokeObjectURL(href);
     removed.remove();
   }
+  while (clips.length > MAX_CLIPS) {
+    const removed = clips.shift();
+    URL.revokeObjectURL(removed.url);
+    const card = [...container.children].find((node) => node.querySelector('a')?.href === removed.url);
+    if (card) card.remove();
+  }
 }
 
-function addClipCard(url, job, start, end, blob) {
+function addClipCard(url, job, start, end, blob, duration = 0) {
   const reel = el('clips');
   const empty = reel.querySelector('.empty');
   if (empty) empty.remove();
 
-  clips.push({ blob, url, start, end, job });
-  while (clips.length > MAX_CLIPS) {
-    const removed = clips.shift();
-    URL.revokeObjectURL(removed.url);
+  const clip = {
+    blob,
+    url,
+    start,
+    end,
+    job,
+    duration: duration || Math.max(0, end - start)
+  };
+  clips.push(clip);
+  if (!duration) {
+    probeDuration(blob).then((actual) => {
+      if (actual) clip.duration = actual;
+    });
   }
 
   const card = document.createElement('div');
@@ -300,21 +349,21 @@ function addClipCard(url, job, start, end, blob) {
   const row = document.createElement('div');
   row.className = 'clip-row';
   const meta = document.createElement('small');
-  meta.textContent = `clip ${job} [${formatTime(start)} -> ${formatTime(end)}]`;
+  meta.textContent = `Clip ${job} [${formatTime(start)} → ${formatTime(end)}]`;
   const link = document.createElement('a');
   link.href = url;
   link.download = `syncwatch-highlight-${job}.mp4`;
-  link.textContent = 'DOWNLOAD';
+  link.textContent = 'Download';
   row.append(meta, link);
 
   const seekBtn = document.createElement('button');
   seekBtn.className = 'btn tiny ghost';
-  seekBtn.textContent = 'SEEK TO';
+  seekBtn.textContent = 'Seek to';
   seekBtn.addEventListener('click', () => seekTo(start));
 
   card.append(row, seekBtn);
   reel.prepend(card);
-  revokeCardUrls(reel);
+  pruneClipsUi();
 }
 
 function addReelCard(url, job, blob, meta = {}) {
@@ -324,20 +373,25 @@ function addReelCard(url, job, blob, meta = {}) {
   const row = document.createElement('div');
   row.className = 'clip-row';
   const label = document.createElement('small');
-  const duration = Number(meta.end) || 0;
-  label.textContent = `FULL REEL [${formatTime(0)} -> ${formatTime(duration || blob.size / 40000)}]`;
+  const known = Number(meta.end) || 0;
+  label.textContent = `Full reel [0:00 → ${known ? formatTime(known) : 'measuring…'}]`;
   const link = document.createElement('a');
   link.href = url;
   link.download = `syncwatch-reel-${job}.mp4`;
-  link.textContent = 'DOWNLOAD REEL';
+  link.textContent = 'Download reel';
   row.append(label, link);
   card.append(row);
   reel.prepend(card);
-  revokeCardUrls(reel);
+  pruneClipsUi();
+  probeDuration(blob).then((actual) => {
+    if (actual) label.textContent = `Full reel [0:00 → ${formatTime(actual)}]`;
+  });
 }
 
 function buildScreenBuffer(seconds) {
   const cutoff = Date.now() - seconds * 1000;
+  // arrayBuffer() resolves out of order; recorder sequence numbers restore it.
+  screenChunks.sort((a, b) => a.seq - b.seq);
   let selected = screenChunks.filter((chunk) => chunk.t >= cutoff);
   if (!selected.length) selected = screenChunks.slice(-5);
   if (!selected.length) return null;
@@ -359,8 +413,7 @@ function clipAt(time) {
     return;
   }
   const requested = Number(el('clipDuration').value) || 8;
-  const start = Math.max(0, time - 4);
-  const end = start + requested;
+  const { start, end } = clipRange(time, requested, video.duration);
 
   if (currentSource.kind === 'screen' && !sharing) {
     setStatus('Only the sharing device can clip the live screen.');
@@ -392,7 +445,7 @@ function clipAt(time) {
       ext: 'webm',
       start: 0,
       duration: buffered.duration,
-      meta: { start: Math.max(0, end - buffered.duration), end }
+      meta: { start: Math.max(0, end - buffered.duration), end, duration: buffered.duration }
     }, [buffered.buffer]);
     return;
   }
@@ -410,7 +463,7 @@ function clipAt(time) {
     ext: currentSource.kind === 'local' ? currentSource.ext : undefined,
     start,
     duration: requested,
-    meta: { start, end }
+    meta: { start, end, duration: requested }
   });
 }
 
@@ -437,17 +490,15 @@ function appendChat(msg) {
 
   line.append(badge);
 
-  const parts = String(msg.text || '').split(/(@\d{1,2}:\d{2})/g);
-  for (const part of parts) {
-    if (/^@\d{1,2}:\d{2}$/.test(part)) {
-      const [minutes, seconds] = part.slice(1).split(':').map(Number);
+  for (const part of splitChatStamps(msg.text)) {
+    if (part.seconds !== null) {
       const button = document.createElement('button');
       button.className = 'chat-stamp';
-      button.textContent = part;
-      button.addEventListener('click', () => seekTo(minutes * 60 + seconds));
+      button.textContent = part.text;
+      button.addEventListener('click', () => seekTo(part.seconds));
       line.append(button);
-    } else if (part) {
-      line.append(document.createTextNode(part));
+    } else if (part.text) {
+      line.append(document.createTextNode(part.text));
     }
   }
 
@@ -490,7 +541,7 @@ function updatePresence(msg) {
     const name = document.createElement('span');
     name.textContent = id === clientId ? 'You' : `Peer ${id.slice(0, 6)}`;
     const role = document.createElement('span');
-    role.textContent = id === msg.hostId ? 'HOST' : 'GUEST';
+    role.textContent = id === msg.hostId ? 'Host' : 'Guest';
     row.append(name, role);
     container.append(row);
   }
@@ -501,9 +552,13 @@ function updatePresence(msg) {
 function setRole(host) {
   isHost = host;
   sync.setHost(host);
-  el('hostState').textContent = host ? 'HOST' : 'GUEST';
+  el('hostState').textContent = host ? 'Host' : 'Guest';
   el('hostState').className = host ? 'on' : '';
-  el('syncTag').textContent = `ROOM ${roomCode} - ${host ? 'HOST' : 'GUEST'}`;
+  el('syncTag').textContent = `Room ${roomCode} · ${host ? 'host' : 'guest'}`;
+  el('playBtn').title = host
+    ? 'Play or pause for everyone in the room'
+    : 'Only the host can control playback';
+  seek.disabled = !host;
 }
 
 function setSample(src, name, broadcast = true) {
@@ -583,13 +638,13 @@ function handleMediaSource(msg) {
     stopScreenReceiver();
   }
   if (source.kind === 'sample') {
-    setSample(source.src, source.name || 'SAMPLE', false);
+    setSample(source.src, source.name || 'Flower', false);
     setStatus('Host switched to a built-in sample.');
   } else if (source.kind === 'url') {
     loadUrl(source.url, false);
     setStatus('Host switched to a direct video URL.');
   } else if (source.kind === 'local') {
-    pendingScreenStream = null;
+    pendingScreenStreams.clear();
     video.pause();
     video.srcObject = null;
     video.removeAttribute('src');
@@ -598,14 +653,14 @@ function handleMediaSource(msg) {
     currentSource = { kind: 'local', src: '', name: source.name };
     setStatus(`Host is playing a local file: ${source.name}. Peers cannot access local files.`);
   } else if (source.kind === 'screen') {
-    const pending = pendingScreenStream;
-    pendingScreenStream = null;
+    const pending = pendingScreenStreams.get(msg.from);
+    pendingScreenStreams.delete(msg.from);
     currentSource = { kind: 'screen', hostId: msg.from };
     video.pause();
     video.srcObject = null;
     sync.resetPlayback();
     setStatus('Host is sharing their screen. Waiting for the live stream...');
-    if (pending && pending.id === msg.from) attachScreenStream(pending.stream, msg.from);
+    if (pending) attachScreenStream(pending, msg.from);
   }
 }
 
@@ -627,8 +682,7 @@ function stopScreenTransmitter() {
 function startScreenTransmitter(stream) {
   stopScreenTransmitter();
   if (!HTMLCanvasElement.prototype.captureStream) {
-    log('Screen relay unavailable: canvas capture is not supported');
-    return;
+    throw new Error('canvas capture is not supported');
   }
   screenTxCanvas = document.createElement('canvas');
   screenTxCtx = screenTxCanvas.getContext('2d', { alpha: false });
@@ -702,6 +756,17 @@ function stopScreenReceiver() {
   }
 }
 
+function leaveCall() {
+  rtc.leave();
+  callJoined = false;
+  el('callTiles').innerHTML = '';
+  pendingScreenStreams.clear();
+  stopScreenReceiver();
+  el('joinCallBtn').textContent = 'Join call';
+  el('muteBtn').disabled = true;
+  el('camBtn').disabled = true;
+}
+
 function handleScreenFrame(msg) {
   if (currentSource.kind !== 'screen') return;
   if (currentSource.hostId && msg.from !== currentSource.hostId) return;
@@ -758,23 +823,20 @@ function handleScreenFrame(msg) {
 
 async function startScreenShare() {
   if (!isHost) {
-    setStatus('Only the room host can share a screen.');
+    setStatus('Only the host can share a screen.');
     return;
   }
   if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
     setStatus('Screen sharing is not supported in this browser.');
     return;
   }
+
+  let stream = null;
   try {
-    const stream = await navigator.mediaDevices.getDisplayMedia({
+    stream = await navigator.mediaDevices.getDisplayMedia({
       video: { frameRate: 30 },
       audio: true
     });
-    sharing = true;
-    sourceBeforeShare = { ...currentSource };
-    pendingScreenStream = null;
-    el('shareBtn').textContent = 'STOP SHARE';
-    currentSource = { kind: 'screen', hostId: clientId };
 
     video.src = '';
     video.removeAttribute('src');
@@ -787,31 +849,60 @@ async function startScreenShare() {
         ? 'video/webm;codecs=vp8,opus'
         : 'video/webm';
       screenChunks = [];
+      screenChunkSeq = 0;
       screenRecorder = new MediaRecorder(stream, { mimeType });
       screenRecorder.ondataavailable = (event) => {
-        if (event.data && event.data.size) {
-          event.data.arrayBuffer().then((buffer) => {
-            screenChunks.push({ t: Date.now(), data: new Uint8Array(buffer) });
-            const cutoff = Date.now() - 30000;
-            screenChunks = screenChunks.filter((chunk) => chunk.t >= cutoff).slice(-200);
-          });
-        }
+        if (!event.data || !event.data.size) return;
+        const seq = ++screenChunkSeq;
+        const at = Date.now();
+        event.data.arrayBuffer().then((buffer) => {
+          screenChunks.push({ seq, t: at, data: new Uint8Array(buffer) });
+          screenChunks.sort((a, b) => a.seq - b.seq);
+          const cutoff = Date.now() - 30000;
+          screenChunks = screenChunks.filter((chunk) => chunk.t >= cutoff).slice(-200);
+        });
       };
       screenRecorder.start(2000);
       log('Rolling screen clip buffer started');
     } catch (error) {
+      screenRecorder = null;
       log(`MediaRecorder unavailable: ${error.message}`);
     }
 
     startScreenTransmitter(stream);
+
+    // Only flip room state after every local step succeeded. A failure above
+    // must never leave the button, recorder, and room out of sync.
+    sourceBeforeShare = { ...currentSource };
+    sharing = true;
+    pendingScreenStreams.clear();
+    el('shareBtn').textContent = 'Stop share';
+    currentSource = { kind: 'screen', hostId: clientId };
     send({ type: 'mediaSource', source: { kind: 'screen', hostId: clientId } });
+    send({ type: 'rtc-meta', kind: 'screen', note: 'screen share started' });
     setStatus('Sharing your screen. Audio is muted locally to prevent echo.');
 
     const track = stream.getVideoTracks()[0];
-    if (track) {
-      track.onended = () => stopScreenShare(true);
-    }
+    if (track) track.onended = () => stopScreenShare(true);
   } catch (error) {
+    if (stream) stream.getTracks().forEach((track) => track.stop());
+    if (screenRecorder && screenRecorder.state !== 'inactive') screenRecorder.stop();
+    screenRecorder = null;
+    screenChunks = [];
+    screenChunkSeq = 0;
+    stopScreenTransmitter();
+    sharing = false;
+    sourceBeforeShare = null;
+    el('shareBtn').textContent = 'Share screen';
+    video.srcObject = null;
+    video.muted = false;
+    if (currentSource.kind === 'sample' || currentSource.kind === 'url') {
+      video.src = currentSource.src;
+      video.load();
+      sync.resetPlayback();
+    } else {
+      setSample(DEFAULT_SAMPLE, DEFAULT_SAMPLE_NAME, false);
+    }
     log(`Screen share failed: ${error.message}`);
     setStatus(`Screen share failed: ${error.message}`);
   }
@@ -820,13 +911,15 @@ async function startScreenShare() {
 function stopScreenShare(fromBrowser = false, restore = true) {
   if (!sharing) return;
   sharing = false;
-  el('shareBtn').textContent = 'SHARE SCREEN';
+  el('shareBtn').textContent = 'Share screen';
   if (screenRecorder && screenRecorder.state !== 'inactive') screenRecorder.stop();
   screenRecorder = null;
   screenChunks = [];
-  pendingScreenStream = null;
+  screenChunkSeq = 0;
+  pendingScreenStreams.clear();
   stopScreenTransmitter();
   rtc.stopScreenShare();
+  send({ type: 'rtc-leave', kind: 'screen' });
   video.srcObject = null;
   video.muted = false;
 
@@ -850,7 +943,7 @@ function connect() {
 
   socket.onopen = () => {
     if (ws !== socket) return;
-    el('netState').textContent = 'ONLINE';
+    el('netState').textContent = 'Online';
     el('netState').className = 'on';
     setStatus('Connected. Syncing clock with the room server...');
     send({ type: 'join', room: roomCode, clientId });
@@ -859,7 +952,7 @@ function connect() {
 
   socket.onclose = () => {
     if (ws !== socket) return;
-    el('netState').textContent = 'OFFLINE';
+    el('netState').textContent = 'Offline';
     el('netState').className = 'off';
     setStatus('Disconnected. Reconnecting...');
     sync.stop();
@@ -889,7 +982,9 @@ function connect() {
       if (sharing && isHost) {
         send({ type: 'mediaSource', source: { kind: 'screen', hostId: clientId } });
       }
-      setStatus(`Joined room ${roomCode}. Press PLAY to start the room.`);
+      setStatus(isHost
+      ? `Joined room ${roomCode}. Press Play to start the room.`
+      : `Joined room ${roomCode}. The host controls playback.`);
       log(`Joined ${roomCode} as ${clientId}`);
       return;
     }
@@ -953,7 +1048,7 @@ function connect() {
     if (msg.type === 'rtc-peer-left') {
       removeCallTiles(msg.from, msg.kind);
       if (msg.kind === 'screen' && currentSource.kind === 'screen' && currentSource.hostId === msg.from) {
-        pendingScreenStream = null;
+        pendingScreenStreams.delete(msg.from);
         stopScreenReceiver();
         setSample(DEFAULT_SAMPLE, DEFAULT_SAMPLE_NAME, false);
         setStatus('The sharer disconnected. Screen share ended.');
@@ -986,7 +1081,9 @@ el('joinBtn').addEventListener('click', () => {
   const nextRoom = roomInput.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8) || 'DEMO';
   if (nextRoom !== roomCode) {
     if (sharing) stopScreenShare(false, false);
+    leaveCall();
     stopScreenReceiver();
+    teles.clear(false);
   }
   roomCode = nextRoom;
   roomInput.value = roomCode;
@@ -995,7 +1092,43 @@ el('joinBtn').addEventListener('click', () => {
   else connect();
 });
 
+el('inviteBtn').addEventListener('click', async () => {
+  const link = new URL(location.href);
+  link.searchParams.set('room', roomCode);
+  const value = link.toString();
+  let copied = false;
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(value);
+      copied = true;
+    }
+  } catch {
+    copied = false;
+  }
+  if (!copied) {
+    const field = document.createElement('textarea');
+    field.value = value;
+    field.setAttribute('readonly', '');
+    field.style.position = 'fixed';
+    field.style.opacity = '0';
+    document.body.append(field);
+    field.select();
+    try {
+      copied = document.execCommand('copy');
+    } catch {
+      copied = false;
+    }
+    field.remove();
+  }
+  log(`Invite link for ${roomCode}: ${value}`);
+  setStatus(copied ? 'Invite link copied to your clipboard.' : `Invite link: ${value}`);
+});
+
 el('playBtn').addEventListener('click', () => {
+  if (!isHost) {
+    setStatus('Only the host can control playback.');
+    return;
+  }
   if (currentSource.kind === 'screen') {
     setStatus('Screen share is live; play/pause is controlled by the sharing browser.');
     return;
@@ -1005,12 +1138,12 @@ el('playBtn').addEventListener('click', () => {
 });
 
 video.addEventListener('play', () => {
-  el('playBtn').textContent = 'PAUSE';
+  el('playBtn').textContent = 'Pause';
   sync.markLocalChange();
 });
 
 video.addEventListener('pause', () => {
-  el('playBtn').textContent = 'PLAY';
+  el('playBtn').textContent = 'Play';
   sync.markLocalChange();
 });
 
@@ -1021,10 +1154,16 @@ seek.addEventListener('keydown', () => { isSeeking = true; });
 seek.addEventListener('keyup', () => { isSeeking = false; });
 seek.addEventListener('input', () => {
   if (!video.duration || video.srcObject) return;
-  video.currentTime = (Number(seek.value) / 1000) * video.duration;
+  video.currentTime = seekFraction(seek.value) * video.duration;
   el('timeLabel').textContent = `${formatTime(video.currentTime)} / ${formatTime(video.duration)}`;
 });
-seek.addEventListener('change', () => sync.markLocalChange());
+// A change/blur without a matching pointerup used to leave isSeeking stuck.
+seek.addEventListener('change', () => {
+  isSeeking = false;
+  sync.markLocalChange();
+});
+seek.addEventListener('blur', () => { isSeeking = false; });
+window.addEventListener('pointerup', () => { isSeeking = false; });
 
 video.addEventListener('timeupdate', () => {
   if (!isSeeking && video.duration && !video.srcObject) {
@@ -1141,7 +1280,10 @@ el('stitchBtn').addEventListener('click', async () => {
   }
   const job = ++ffmpegJob;
   const buffers = [];
-  reelDuration = clips.reduce((sum, clip) => sum + Math.max(0, clip.end - clip.start), 0);
+  reelDuration = clips.reduce(
+    (sum, clip) => sum + Math.max(0, clip.duration || clip.end - clip.start),
+    0
+  );
   for (const clip of clips) buffers.push(await clip.blob.arrayBuffer());
   activeJobs.add(job);
   setStatus('Stitching the highlight reel...');
@@ -1153,23 +1295,17 @@ el('stitchBtn').addEventListener('click', async () => {
 
 el('joinCallBtn').addEventListener('click', async () => {
   if (callJoined) {
-    rtc.leave();
-    callJoined = false;
-    el('callTiles').innerHTML = '';
-    pendingScreenStream = null;
+    leaveCall();
     if (currentSource.kind === 'screen' && !sharing) {
       setSample(DEFAULT_SAMPLE, DEFAULT_SAMPLE_NAME, false);
     }
-    el('joinCallBtn').textContent = 'JOIN CALL';
-    el('muteBtn').disabled = true;
-    el('camBtn').disabled = true;
     return;
   }
   try {
     const stream = await rtc.joinCall();
     renderCallTile(clientId, 'cam', stream, true);
     callJoined = true;
-    el('joinCallBtn').textContent = 'LEAVE CALL';
+    el('joinCallBtn').textContent = 'Leave call';
     el('muteBtn').disabled = false;
     el('camBtn').disabled = false;
     setStatus('Call joined. Local preview is muted.');
@@ -1181,12 +1317,12 @@ el('joinCallBtn').addEventListener('click', async () => {
 
 el('muteBtn').addEventListener('click', () => {
   const muted = rtc.toggleMic();
-  el('muteBtn').textContent = muted ? 'UNMUTE' : 'MIC MUTE';
+  el('muteBtn').textContent = muted ? 'Unmute mic' : 'Mute mic';
 });
 
 el('camBtn').addEventListener('click', () => {
   const off = rtc.toggleCam();
-  el('camBtn').textContent = off ? 'CAM ON' : 'CAM TOGGLE';
+  el('camBtn').textContent = off ? 'Camera on' : 'Camera';
 });
 
 if ('ResizeObserver' in window) new ResizeObserver(() => teles.resize()).observe(screen);

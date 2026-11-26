@@ -3,34 +3,35 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>SyncWatch Party - Co-op Watch Room</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230b1018'/%3E%3Cpath d='M14 20h24a8 8 0 0 1 8 8v16a8 8 0 0 1-8 8H14z' fill='none' stroke='%235eead4' stroke-width='5'/%3E%3Cpath d='m28 28 12 8-12 8z' fill='%235eead4'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/styles.css?v=3">
+  <title>SyncWatch Party — A screening room in your browser</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%231a1310'/%3E%3Cpath d='M14 20h24a8 8 0 0 1 8 8v16a8 8 0 0 1-8 8H14z' fill='none' stroke='%23f0a95c' stroke-width='5'/%3E%3Cpath d='m28 28 12 8-12 8z' fill='%23f0a95c'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/styles.css?v=5">
 </head>
 <body>
   <div class="app">
     <header class="topbar">
       <div class="brand">
-        <span class="brand-mark">SW</span>
+        <span class="brand-mark" aria-hidden="true"></span>
         <div>
           <h1>SyncWatch Party</h1>
-          <p>Real-time co-op viewing room</p>
+          <p>A screening room in your browser.</p>
         </div>
       </div>
 
       <div class="join-box">
-        <label for="roomInput">ROOM CODE</label>
+        <label for="roomInput">Room code</label>
         <input id="roomInput" value="SPARK" maxlength="8" autocomplete="off" spellcheck="false">
-        <button id="joinBtn" class="btn primary">Join</button>
+        <button id="joinBtn" class="btn primary">Join room</button>
+        <button id="inviteBtn" class="btn ghost">Copy invite link</button>
       </div>
 
       <div class="telemetry" aria-label="Live sync telemetry">
-        <div class="badge"><span>NET</span><strong id="netState">OFFLINE</strong></div>
-        <div class="badge"><span>ROLE</span><strong id="hostState">-</strong></div>
-        <div class="badge"><span>OFFSET</span><strong id="offsetVal">0 ms</strong></div>
+        <div class="badge"><span>Net</span><strong id="netState">Offline</strong></div>
+        <div class="badge"><span>Role</span><strong id="hostState">—</strong></div>
+        <div class="badge"><span>Offset</span><strong id="offsetVal">0 ms</strong></div>
         <div class="badge"><span>RTT</span><strong id="rttVal">0 ms</strong></div>
-        <div class="badge"><span>DRIFT</span><strong id="driftVal">0 ms</strong></div>
-        <div class="badge"><span>PEERS</span><strong id="guestVal">1</strong></div>
+        <div class="badge"><span>Drift</span><strong id="driftVal">0 ms</strong></div>
+        <div class="badge"><span>Peers</span><strong id="guestVal">1</strong></div>
       </div>
     </header>
 
@@ -38,42 +39,42 @@
       <section class="panel stage-panel">
         <div class="panel-head">
           <div class="sample-tabs" aria-label="Built-in sample videos">
-            <button class="tab active" data-src="/samples/flower.mp4">FLOWER</button>
-            <button class="tab" data-src="/samples/friday.mp4">FRIDAY</button>
+            <button class="tab active" data-src="/samples/flower.mp4">Flower</button>
+            <button class="tab" data-src="/samples/friday.mp4">Friday</button>
           </div>
           <div class="tools">
-            <button id="penBtn" class="btn tool" title="Draw with pen">PEN</button>
-            <button id="arrowBtn" class="btn tool" title="Draw an arrow">ARROW</button>
-            <div class="swatches" aria-label="Telestrator color">
-              <button class="swatch active" data-color="#56d6c4" style="--swatch:#56d6c4" title="Teal"></button>
-              <button class="swatch" data-color="#f0b85a" style="--swatch:#f0b85a" title="Amber"></button>
-              <button class="swatch" data-color="#ff7a7a" style="--swatch:#ff7a7a" title="Red"></button>
-              <button class="swatch" data-color="#e6edf3" style="--swatch:#e6edf3" title="White"></button>
-              <button class="swatch" data-color="#6aa9ff" style="--swatch:#6aa9ff" title="Blue"></button>
+            <button id="penBtn" class="btn tool" title="Draw with pen">Pen</button>
+            <button id="arrowBtn" class="btn tool" title="Draw an arrow">Arrow</button>
+            <div class="swatches" aria-label="Drawing color">
+              <button class="swatch active" data-color="#f0a95c" style="--swatch:#f0a95c" title="Amber"></button>
+              <button class="swatch" data-color="#e0706a" style="--swatch:#e0706a" title="Rose"></button>
+              <button class="swatch" data-color="#f4eadf" style="--swatch:#f4eadf" title="Ivory"></button>
+              <button class="swatch" data-color="#8fd0b4" style="--swatch:#8fd0b4" title="Sage"></button>
+              <button class="swatch" data-color="#9ab8d8" style="--swatch:#9ab8d8" title="Slate"></button>
             </div>
-            <label class="toggle"><input id="fadeToggle" type="checkbox"> AUTO-FADE</label>
-            <button id="clearBtn" class="btn ghost">CLEAR</button>
+            <label class="toggle"><input id="fadeToggle" type="checkbox"> Auto-fade</label>
+            <button id="clearBtn" class="btn ghost">Clear</button>
           </div>
         </div>
 
         <div class="source-bar">
-          <input id="urlInput" type="url" placeholder="Paste direct .mp4/.webm URL" spellcheck="false">
-          <button id="loadUrlBtn" class="btn ghost">LOAD URL</button>
-          <label class="btn ghost file-label">LOCAL FILE<input id="fileInput" type="file" accept="video/mp4,video/webm,.mp4,.webm" hidden></label>
-          <button id="shareBtn" class="btn ghost">SHARE SCREEN</button>
+          <input id="urlInput" type="url" placeholder="Paste a direct .mp4 or .webm link" spellcheck="false">
+          <button id="loadUrlBtn" class="btn ghost">Load URL</button>
+          <label class="btn ghost file-label">Local file<input id="fileInput" type="file" accept="video/mp4,video/webm,.mp4,.webm" hidden></label>
+          <button id="shareBtn" class="btn ghost">Share screen</button>
         </div>
 
         <div class="screen" id="screen">
           <video id="video" playsinline preload="auto"></video>
           <canvas id="overlay"></canvas>
-          <div class="screen-tag" id="syncTag">WAITING FOR ROOM</div>
+          <div class="screen-tag" id="syncTag">Waiting for room</div>
           <div id="floatLayer" class="float-layer" aria-hidden="true"></div>
         </div>
 
         <div class="reaction-strip" id="reactionStrip" aria-label="Timeline reactions"></div>
 
         <div class="controls">
-          <button id="playBtn" class="btn primary">PLAY</button>
+          <button id="playBtn" class="btn primary">Play</button>
           <input id="seek" type="range" min="0" max="1000" value="0" aria-label="Seek">
           <span id="timeLabel" class="time-label">0:00 / 0:00</span>
           <select id="clipDuration" aria-label="Clip duration">
@@ -81,12 +82,12 @@
             <option value="8" selected>8s clip</option>
             <option value="10">10s clip</option>
           </select>
-          <button id="clipBtn" class="btn accent">CLIP THAT</button>
-          <button id="clipNowBtn" class="btn ghost">CLIP NOW</button>
+          <button id="clipBtn" class="btn clip">Clip that</button>
+          <button id="clipNowBtn" class="btn ghost">Clip now</button>
         </div>
 
         <div class="reactions">
-          <span>REACT</span>
+          <span>React</span>
           <button class="reaction" data-emoji="&#128293;">&#128293;</button>
           <button class="reaction" data-emoji="&#127919;">&#127919;</button>
           <button class="reaction" data-emoji="&#9889;">&#9889;</button>
@@ -98,46 +99,46 @@
 
       <aside class="panel side-panel">
         <section>
-          <h2>ROOM</h2>
+          <h2>Room</h2>
           <div class="call-controls">
-            <button id="joinCallBtn" class="btn ghost">JOIN CALL</button>
-            <button id="muteBtn" class="btn ghost" disabled>MIC MUTE</button>
-            <button id="camBtn" class="btn ghost" disabled>CAM TOGGLE</button>
+            <button id="joinCallBtn" class="btn ghost">Join call</button>
+            <button id="muteBtn" class="btn ghost" disabled>Mute mic</button>
+            <button id="camBtn" class="btn ghost" disabled>Camera</button>
           </div>
           <div id="callTiles" class="call-tiles"></div>
           <div id="presence" class="presence"><div class="peer">You</div></div>
         </section>
 
         <section>
-          <h2>ROOM CHAT</h2>
-          <div id="chatMessages" class="chat-messages"><p class="empty">No messages yet.</p></div>
+          <h2>Room chat</h2>
+          <div id="chatMessages" class="chat-messages"><p class="empty">Nothing said yet. Say hello.</p></div>
           <form id="chatForm" class="chat-form">
             <input id="chatInput" placeholder="Message the room..." autocomplete="off" maxlength="500">
-            <button class="btn primary" type="submit">SEND</button>
+            <button class="btn primary" type="submit">Send</button>
           </form>
         </section>
 
         <section>
-          <h2>CLIP REEL</h2>
-          <button id="stitchBtn" class="btn ghost">STITCH REEL</button>
+          <h2>Clip reel</h2>
+          <button id="stitchBtn" class="btn ghost">Stitch reel</button>
           <div id="clips" class="clips">
-            <p class="empty">No clips yet. Watch something and press CLIP THAT.</p>
+            <p class="empty">No clips yet. Watch something and press Clip that.</p>
           </div>
         </section>
 
         <section>
-          <h2>ACTIVITY</h2>
+          <h2>Activity</h2>
           <div id="log" class="log"></div>
         </section>
       </aside>
     </main>
 
     <footer>
-      <span>SyncWatch Party - built for the CSC Winter Sparkathon</span>
-      <span>Demo videos: MDN CC0 samples - FFmpeg.wasm runs in your browser</span>
+      <span>SyncWatch Party — built for the CSC Winter Sparkathon</span>
+      <span>Demo videos: MDN CC0 samples · FFmpeg.wasm runs in your browser</span>
     </footer>
   </div>
 
-  <script type="module" src="/js/app.js?v=4"></script>
+  <script type="module" src="/js/app.js?v=5"></script>
 </body>
 </html>

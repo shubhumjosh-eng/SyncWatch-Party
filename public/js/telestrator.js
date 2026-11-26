@@ -173,7 +173,7 @@ export class Telestrator {
         existing.tool = incoming.tool;
         existing.color = incoming.color;
         existing.width = incoming.width;
-        existing.createdAt = incoming.createdAt;
+        // Keep the local receipt time; a sender's clock may be skewed.
         existing.done = incoming.done;
       } else {
         this.pushStroke(incoming);
@@ -250,7 +250,8 @@ function sanitizeStroke(raw, fallbackColor, fallbackWidth, now) {
     color: sanitizeColor(raw.color, fallbackColor),
     width: clamp(finiteNumber(raw.width, fallbackWidth), MIN_WIDTH, MAX_WIDTH),
     points,
-    createdAt: clamp(finiteNumber(raw.createdAt, now), 0, now + 60000),
+    // Fade using the receiver's clock, never the sender's potentially skewed one.
+    createdAt: now,
     done: !!raw.done
   };
 }

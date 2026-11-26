@@ -16,7 +16,7 @@ SyncWatch Party
 
 ## Tagline / subtitle
 
-Watch together, perfectly in sync.
+A screening room in your browser.
 
 ## Short description
 
@@ -62,15 +62,15 @@ I built this solo to make shared viewing feel like being in the same room — lo
 
 | Time | Action |
 | --- | --- |
-| 0:00–0:08 | Show the live link and room code. Open two tabs with the same room code. |
-| 0:08–0:18 | Point out `NET: ONLINE`, `ROLE: HOST/GUEST`, and `PEERS: 2`. |
-| 0:18–0:30 | Host clicks **FLOWER**, then **PLAY**. Guest starts within milliseconds. |
+| 0:00–0:08 | Show the live link and room code. Open two tabs with the same room code, or use **Copy invite link**. |
+| 0:08–0:18 | Point out `Net: Online`, `Role: Host/Guest`, and `Peers: 2`. |
+| 0:18–0:30 | Host clicks **Flower**, then **Play**. Guest starts within milliseconds, and guest Play is ignored. |
 | 0:30–0:42 | Guest types `hello @00:02` and sends. Click the timestamp to seek. |
-| 0:42–0:55 | Click 🔥/⚡ reactions; show floating emoji and timeline markers. |
-| 0:55–1:08 | Press **JOIN CALL** in both tabs; show local and peer video tiles. |
-| 1:08–1:18 | Host presses **SHARE SCREEN** and shares a tab; guest sees the stream. |
-| 1:18–1:30 | Draw with **PEN** and **ARROW**, then press **CLIP THAT** in both tabs. |
-| 1:30–1:40 | Show the generated MP4 clip and **STITCH REEL** result. |
+| 0:42–0:55 | Click 🔥/⚡ reactions; show one floating emoji and timeline marker per viewer. |
+| 0:55–1:08 | Press **Join call** in both tabs; show local and peer video tiles. |
+| 1:08–1:18 | Host presses **Share screen** and shares a tab; guest sees the stream. |
+| 1:18–1:30 | Draw with **Pen** and **Arrow**, then press **Clip that** in both tabs. |
+| 1:30–1:40 | Show the generated MP4 clip and **Stitch reel** result. |
 | 1:40–1:50 | Close with the GitHub link and one line about browser-side FFmpeg. |
 
 ## Submission checklist

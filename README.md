@@ -1,6 +1,6 @@
 # SyncWatch Party
 
-A zero-install, real-time co-op watch room. Friends join the same room code, watch in sync, chat with timestamped messages, take a voice/video call, share a screen or tab, draw together, react on a timeline, and cut highlight clips that are encoded entirely in the browser with FFmpeg.wasm.
+A screening room in your browser. Friends join with a link or room code, watch in sync, chat with timestamped messages, take a voice/video call, share a screen or tab, draw together, react on a timeline, and cut highlight clips that are encoded entirely in the browser with FFmpeg.wasm.
 
 Built for the **CSC Winter Sparkathon** — technology that helps people share an experience.
 
@@ -22,20 +22,20 @@ Open `http://localhost:3000`. Open a second tab (or share your LAN URL) with the
 
 ## One-minute judge demo
 
-1. Open `http://localhost:3000?room=SPARK` in two tabs.
-2. Both tabs show `ONLINE`; the first tab is `HOST`.
-3. Press **PLAY** in the host tab. The guest tab starts within a few hundred milliseconds.
-4. Type `hello @00:02` in **Room Chat** and press SEND. Click the timestamp to seek.
-5. Press **JOIN CALL** in both tabs to create local camera previews and peer video tiles.
-6. Press **SHARE SCREEN** in the host tab and choose a tab/window. Guests automatically see the live stream.
-7. Press **PEN** or **ARROW** and draw on the video; toggle **AUTO-FADE** and color swatches.
-8. Press **CLIP THAT** in both tabs within five seconds, or use **CLIP NOW**. Both browsers produce an 8-second MP4 with a 4-second pre-roll.
-9. Make two clips, then press **STITCH REEL** to concatenate them into one downloadable MP4.
+1. Open `http://localhost:3000?room=SPARK` in two tabs, or use **Copy invite link** to share the room.
+2. Both tabs show `Online`; the first tab is `Host`.
+3. Press **Play** in the host tab. The guest tab starts within a few hundred milliseconds; guests cannot override playback.
+4. Type `hello @00:02` in **Room chat** and press **Send**. Click the timestamp to seek.
+5. Press **Join call** in both tabs to create local camera previews and peer video tiles.
+6. Press **Share screen** in the host tab and choose a tab/window. Guests automatically see the live stream, including late joiners.
+7. Press **Pen** or **Arrow** and draw on the video; toggle **Auto-fade** and color swatches.
+8. Press **Clip that** in both tabs within five seconds, or use **Clip now**. Both browsers produce an 8-second MP4 with a 4-second pre-roll.
+9. Make two clips, then press **Stitch reel** to concatenate them into one downloadable MP4.
 
 ## Features
 
 - **NTP-style sync** — clock offset, RTT, and drift telemetry; host-authoritative play/pause/seek with `playbackRate` correction.
-- **Room chat** — WebSocket broadcast with user color badges and clickable `@MM:SS` timestamps that seek the player.
+- **Room chat** — WebSocket broadcast with user color badges and clickable `@M:SS` timestamps that seek the player. Blank messages are dropped.
 - **Reactions** — floating emoji over the video and markers on a timeline reaction strip.
 - **WebRTC call** — camera/mic stream (`kind: 'cam'`) with Join Call, Mic Mute, Cam Toggle, and compact live peer tiles.
 - **Screen share** — host `getDisplayMedia` stream (`kind: 'screen'`), muted locally to prevent echo, relayed over the room WebSocket so it works across different networks, with browser-bar stop handling and automatic delivery to late joiners.
@@ -54,6 +54,7 @@ Open `http://localhost:3000`. Open a second tab (or share your LAN URL) with the
 - `public/js/rtcCall.js` — `RTCPeerConnection` with `stun:stun.l.google.com:19302`, one connection per peer per stream kind.
 - `public/js/ffmpegWorker.js` — Web Worker. Loads `@ffmpeg/core` ESM from same-origin blob URLs, clips URL/buffer inputs, and stitches clips with the concat demuxer. Jobs are serialized, use per-job filenames, clean up MEMFS in `finally`, and re-encode reels for consistent output.
 - `public/js/app.js` — room controller tying sync, chat, reactions, RTC, media sources, telestrator, and clipping together.
+- `public/js/shared.mjs` — pure range/timestamp/seek helpers shared with Node regression tests.
 - `public/samples/` — small CC0 sample videos from MDN's interactive examples.
 
 ## Deploying
@@ -77,7 +78,7 @@ Set `ALLOWED_ORIGINS` to a comma-separated list of trusted origins if the app is
 ## Tests
 
 ```bash
-npm test        # server range requests, room isolation, signaling, validation
+npm test        # 23 tests: ranges, rooms, relay, signaling, client helpers, validation
 npm run check   # syntax check every JS module
 ```
 
@@ -97,7 +98,7 @@ npm run check   # syntax check every JS module
 
 ## Known limitations
 
-- No authentication or accounts — room codes are lightweight demo identifiers.
+- No authentication or accounts — room codes are lightweight demo identifiers; empty rooms are deleted immediately and the server caps active rooms at 64.
 - A guest cannot access another user's local file; the host broadcasts only a notice for local files.
 - Screen clips use a rolling ~30s WebM buffer and depend on browser `MediaRecorder` support.
 - Screen relay quality depends on the room server's bandwidth and uses adaptive WebP/JPEG frames up to ~15 fps rather than a native 30 fps desktop stream. It still carries audio through the separate WebRTC call, not through the relay.
